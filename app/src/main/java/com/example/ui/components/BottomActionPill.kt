@@ -101,9 +101,9 @@ fun BottomActionPill(
     // Outer Pill Container matching screenshot style
     Box(
       modifier = Modifier
-        .clip(RoundedCornerShape(36.dp))
-        .background(Color(0xFFB0BAC5).copy(alpha = 0.82f))
-        .padding(horizontal = 16.dp, vertical = 8.dp)
+        .clip(RoundedCornerShape(40.dp))
+        .background(Color(0xFFB3BCC7))
+        .padding(horizontal = 14.dp, vertical = 6.dp)
         .testTag("bottom_action_pill_container")
     ) {
       Row(
@@ -120,12 +120,12 @@ fun BottomActionPill(
               interactionSource = remember { MutableInteractionSource() },
               indication = ripple(bounded = true, color = Color.White)
             ) { onPhotoClick() }
-            .padding(horizontal = 16.dp, vertical = 14.dp)
+            .padding(horizontal = 14.dp, vertical = 14.dp)
             .testTag("action_photo_button")
         ) {
           Text(
             text = "PHOTO",
-            color = Color(0xFF1E293B),
+            color = Color(0xFF202A37),
             fontWeight = FontWeight.Bold,
             fontSize = 15.sp,
             letterSpacing = 0.5.sp
@@ -137,9 +137,9 @@ fun BottomActionPill(
           contentAlignment = Alignment.Center,
           modifier = Modifier
             .scale(pulseScale)
-            .size(56.dp)
+            .size(54.dp)
             .clip(CircleShape)
-            .background(if (isRecording) Color(0xFFB91C1C) else Color(0xFFE53935))
+            .background(if (isRecording) Color(0xFFB91C1C) else Color(0xFFEE3A3A))
             .clickable(
               interactionSource = remember { MutableInteractionSource() },
               indication = ripple(bounded = true, color = Color.White)
@@ -155,21 +155,22 @@ fun BottomActionPill(
                 imageVector = Icons.Default.Stop,
                 contentDescription = "Stop Recording",
                 tint = Color.White,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(18.dp)
               )
             } else {
-              Icon(
-                imageVector = Icons.Default.FiberManualRecord,
-                contentDescription = "Record",
-                tint = Color.White,
-                modifier = Modifier.size(12.dp)
+              Box(
+                modifier = Modifier
+                  .size(8.dp)
+                  .clip(CircleShape)
+                  .background(Color.White)
               )
             }
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
               text = if (isRecording) "STOP" else "REC",
               color = Color.White,
               fontWeight = FontWeight.Black,
-              fontSize = 10.sp,
+              fontSize = 9.sp,
               letterSpacing = 0.5.sp
             )
           }
@@ -189,7 +190,7 @@ fun BottomActionPill(
         ) {
           Text(
             text = "Open",
-            color = Color(0xFF1E293B),
+            color = Color(0xFF202A37),
             fontWeight = FontWeight.Bold,
             fontSize = 15.sp
           )
@@ -209,7 +210,7 @@ fun BottomActionPill(
         ) {
           Text(
             text = "Clear",
-            color = Color(0xFF1E293B),
+            color = Color(0xFF202A37),
             fontWeight = FontWeight.Bold,
             fontSize = 15.sp
           )

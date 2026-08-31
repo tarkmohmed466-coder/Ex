@@ -36,8 +36,8 @@ fun TopModePill(
   // Outer pill background matching screenshot: soft rounded container
   Box(
     modifier = modifier
-      .clip(RoundedCornerShape(32.dp))
-      .background(Color(0xFF9FAAB5).copy(alpha = 0.55f))
+      .clip(RoundedCornerShape(36.dp))
+      .background(Color(0xFF9EABB7))
       .padding(horizontal = 6.dp, vertical = 6.dp)
       .testTag("top_mode_pill_container")
   ) {
@@ -54,19 +54,19 @@ fun TopModePill(
         }
 
         val pillBgColor by animateColorAsState(
-          targetValue = if (isSelected) Color(0xFF7D8C9C) else Color.Transparent,
+          targetValue = if (isSelected) Color(0xFF758595) else Color.Transparent,
           animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
           label = "pill_bg_anim"
         )
         val textColor by animateColorAsState(
-          targetValue = if (isSelected) Color(0xFF0F172A) else Color(0xFF334155),
+          targetValue = if (isSelected) Color(0xFF1E293B) else Color(0xFF475569),
           label = "pill_text_color"
         )
 
         Box(
           contentAlignment = Alignment.Center,
           modifier = Modifier
-            .clip(RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(26.dp))
             .background(pillBgColor)
             .clickable(
               interactionSource = remember { MutableInteractionSource() },
@@ -74,7 +74,7 @@ fun TopModePill(
             ) {
               onModeSelected(mode)
             }
-            .padding(horizontal = 24.dp, vertical = 10.dp)
+            .padding(horizontal = 24.dp, vertical = 11.dp)
             .testTag("mode_tab_${mode.name.lowercase()}")
         ) {
           Text(
@@ -88,3 +88,4 @@ fun TopModePill(
     }
   }
 }
+

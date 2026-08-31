@@ -171,6 +171,21 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     }
   }
 
+  fun placeArAnchorAt(worldX: Float, worldY: Float, worldZ: Float) {
+    val model = _selectedModel.value ?: return
+    val newAnchor = SpatialAnchor(
+      id = "anchor_${System.currentTimeMillis()}",
+      posX = worldX,
+      posY = worldY,
+      posZ = worldZ,
+      rotY = (Math.random() * 360).toFloat(),
+      modelId = model.id
+    )
+    _arAnchors.update { it + newAnchor }
+    emitToast("Spatial Anchor Placed (${_arAnchors.value.size})")
+    log("AR_TRACKING", "Anchor pinned at hit: (%.2f, %.2f, %.2f)".format(worldX, worldY, worldZ))
+  }
+
   fun placeArAnchor(x: Float, y: Float) {
     val model = _selectedModel.value ?: return
     val newAnchor = SpatialAnchor(
@@ -186,10 +201,23 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     log("AR_TRACKING", "Placed spatial anchor at (${newAnchor.posX}, ${newAnchor.posY}, ${newAnchor.posZ})")
   }
 
-  fun clearScene() {
+  fun resetOrRestoreModel() {
     _arAnchors.value = emptyList()
-    emitToast("Scene Cleared & Anchors Reset")
-    log("SCENE", "Scene and anchors cleared")
+    if (_selectedModel.value == null) {
+      _selectedModel.value = _modelsList.value.firstOrNull()
+      emitToast("Default Model Restored & Reset")
+      log("SCENE", "Restored default model and reset anchors")
+    } else {
+      emitToast("Model Pose & Scale Reset")
+      log("SCENE", "Reset spatial transform and anchors")
+    }
+  }
+
+  fun clearScene() {
+    _selectedModel.value = null
+    _arAnchors.value = emptyList()
+    emitToast("Model & Scene Cleared")
+    log("SCENE", "Active model and spatial anchors cleared")
   }
 
   fun setShowModelSelector(show: Boolean) { _showModelSelector.value = show }

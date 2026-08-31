@@ -41,6 +41,8 @@ class SpatialRenderer(
   var scale: Float = 1.0f
   var panX: Float = 0.0f
   var panY: Float = 0.0f
+  var sensorRotX: Float = 0.0f
+  var sensorRotY: Float = 0.0f
 
   // Viewport dimensions
   private var surfaceWidth: Int = 1080
@@ -60,6 +62,7 @@ class SpatialRenderer(
   private var uEmissiveLoc: Int = -1
   private var uAmbientIntensityLoc: Int = -1
   private var uIsGridLoc: Int = -1
+  private var uIsUnlitLoc: Int = -1
 
   // Matrices
   private val projectionMatrix = FloatArray(16)
@@ -102,6 +105,7 @@ class SpatialRenderer(
       uEmissiveLoc = GLES30.glGetUniformLocation(programId, "uEmissive")
       uAmbientIntensityLoc = GLES30.glGetUniformLocation(programId, "uAmbientIntensity")
       uIsGridLoc = GLES30.glGetUniformLocation(programId, "uIsGrid")
+      uIsUnlitLoc = GLES30.glGetUniformLocation(programId, "uIsUnlit")
     }
 
     initGridMesh()
@@ -172,13 +176,9 @@ class SpatialRenderer(
 
     // Set background clear color
     when (displayMode) {
-      DisplayMode.AR -> {
-        // Transparent clear for Camera Passthrough
+      DisplayMode.AR, DisplayMode.MR -> {
+        // Transparent clear for Camera Passthrough in both AR & MR modes
         GLES30.glClearColor(0.0f, 0.0f, 0.0f, 0.0f)
-      }
-      DisplayMode.MR -> {
-        // Spatial MR background
-        GLES30.glClearColor(0.02f, 0.03f, 0.06f, 1.0f)
       }
       DisplayMode.OBJECT -> {
         // Pure sleek dark OLED canvas
@@ -296,8 +296,8 @@ class SpatialRenderer(
             posX = panX,
             posY = panY,
             posZ = 0.0f,
-            rotationX = rotX,
-            rotationY = rotY,
+            rotationX = rotX + sensorRotX,
+            rotationY = rotY + sensorRotY,
             scaleFactor = scale
           )
           totalDrawCalls += calls
@@ -320,8 +320,8 @@ class SpatialRenderer(
             posX = panX,
             posY = panY,
             posZ = 0.0f,
-            rotationX = rotX,
-            rotationY = rotY,
+            rotationX = rotX + sensorRotX,
+            rotationY = rotY + sensorRotY,
             scaleFactor = scale
           )
           totalDrawCalls += calls
@@ -401,6 +401,13 @@ class SpatialRenderer(
         mat.emissiveG * mat.emissiveIntensity,
         mat.emissiveB * mat.emissiveIntensity
       )
+      GLES30.glUniform1i(uIsUnlitLoc, if (mat.isUnlit) 1 else 0)
+
+      if (mat.isDoubleSided) {
+        GLES30.glDisable(GLES30.GL_CULL_FACE)
+      } else {
+        GLES30.glEnable(GLES30.GL_CULL_FACE)
+      }
 
       GLES30.glEnableVertexAttribArray(0)
       GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, 0, mesh.vertexBuffer)
@@ -418,6 +425,8 @@ class SpatialRenderer(
       calls++
     }
 
+    // Restore culling state
+    GLES30.glEnable(GLES30.GL_CULL_FACE)
     return calls
   }
 
@@ -432,6 +441,7 @@ class SpatialRenderer(
     GLES30.glUniformMatrix4fv(uNormalMatrixLoc, 1, false, normalMatrix, 0)
     GLES30.glUniformMatrix4fv(uMVPMatrixLoc, 1, false, mvpMatrix, 0)
     GLES30.glUniform1i(uIsGridLoc, 1)
+    GLES30.glUniform1i(uIsUnlitLoc, 0)
 
     GLES30.glEnableVertexAttribArray(0)
     GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, 0, gridMesh.vertexBuffer)
@@ -444,6 +454,48 @@ class SpatialRenderer(
 
     GLES30.glDisableVertexAttribArray(0)
     GLES30.glDisableVertexAttribArray(1)
+  }
+
+  fun screenToPlaneHit(touchX: Float, touchY: Float, planeY: Float = -1.2f): FloatArray? {
+    if (surfaceWidth == 0 || surfaceHeight == 0) return null
+    // Normalized Device Coordinates (-1 to 1)
+    val ndcX = (touchX / surfaceWidth.toFloat()) * 2.0f - 1.0f
+    val ndcY = 1.0f - (touchY / surfaceHeight.toFloat()) * 2.0f
+
+    val invPV = FloatArray(16)
+    val pv = FloatArray(16)
+    Matrix.multiplyMM(pv, 0, projectionMatrix, 0, viewMatrix, 0)
+    if (!Matrix.invertM(invPV, 0, pv, 0)) return null
+
+    val nearPoint = floatArrayOf(ndcX, ndcY, -1.0f, 1.0f)
+    val farPoint = floatArrayOf(ndcX, ndcY, 1.0f, 1.0f)
+
+    val worldNear = FloatArray(4)
+    val worldFar = FloatArray(4)
+    Matrix.multiplyMV(worldNear, 0, invPV, 0, nearPoint, 0)
+    Matrix.multiplyMV(worldFar, 0, invPV, 0, farPoint, 0)
+
+    if (worldNear[3] == 0f || worldFar[3] == 0f) return null
+
+    val pNearX = worldNear[0] / worldNear[3]
+    val pNearY = worldNear[1] / worldNear[3]
+    val pNearZ = worldNear[2] / worldNear[3]
+
+    val pFarX = worldFar[0] / worldFar[3]
+    val pFarY = worldFar[1] / worldFar[3]
+    val pFarZ = worldFar[2] / worldFar[3]
+
+    val dirX = pFarX - pNearX
+    val dirY = pFarY - pNearY
+    val dirZ = pFarZ - pNearZ
+
+    if (dirY == 0f) return null
+    val t = (planeY - pNearY) / dirY
+    if (t < 0) return null
+
+    val hitX = pNearX + dirX * t
+    val hitZ = pNearZ + dirZ * t
+    return floatArrayOf(hitX, planeY, hitZ)
   }
 
   fun requestSnapshot(callback: (Bitmap) -> Unit) {
@@ -470,5 +522,7 @@ class SpatialRenderer(
     scale = 1.0f
     panX = 0.0f
     panY = 0.0f
+    sensorRotX = 0.0f
+    sensorRotY = 0.0f
   }
 }
