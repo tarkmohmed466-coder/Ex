@@ -88,10 +88,10 @@ fun DiagnosticsHud(
           color = Color(0xFF4ADE80)
         )
         Text(
-          text = "AR: ${telemetry.arTrackingStatus}",
+          text = "Walk: ${String.format("%.2f", telemetry.walkingDisplacementMeters)}m",
           fontFamily = FontFamily.Monospace,
           fontSize = 11.sp,
-          color = if (telemetry.arTrackingStatus.contains("TRACKING")) Color(0xFF22C55E) else Color(0xFFEAB308)
+          color = Color(0xFFA78BFA)
         )
       }
 
@@ -101,7 +101,7 @@ fun DiagnosticsHud(
         modifier = Modifier.fillMaxWidth()
       ) {
         Text(
-          text = "Depth: ${String.format("%.2f", telemetry.depthAvgMeters)}m ${if (telemetry.depthOcclusionDetected) "[OCCLUSION ON]" else ""}",
+          text = "Depth: ${String.format("%.2f", telemetry.depthAvgMeters)}m ${if (telemetry.depthOcclusionDetected) "[OCCLUSION]" else ""}",
           fontFamily = FontFamily.Monospace,
           fontSize = 10.sp,
           color = if (telemetry.depthOcclusionDetected) Color(0xFFF43F5E) else Color(0xFF38BDF8)
@@ -120,7 +120,7 @@ fun DiagnosticsHud(
         modifier = Modifier.fillMaxWidth()
       ) {
         Text(
-          text = "Planes: H:${telemetry.horizontalPlanesCount} V:${telemetry.verticalPlanesCount} | Anchors: ${telemetry.activeAnchorsCount}",
+          text = "Planes: H:${telemetry.horizontalPlanesCount} V:${telemetry.verticalPlanesCount} | Images: ${telemetry.trackedImagesCount} | Anchors: ${telemetry.activeAnchorsCount}",
           fontFamily = FontFamily.Monospace,
           fontSize = 10.sp,
           color = Color(0xFF94A3B8)

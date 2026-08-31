@@ -9,6 +9,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.arcore.ArCoreTrackingData
 import com.example.arcore.DepthOcclusionManager
+import com.example.arcore.ExhibitMarker
+import com.example.arcore.ExhibitSource
+import com.example.arcore.ImageMarkerCatalog
 import com.example.engine.DiagnosticsLogger
 import com.example.engine.LogEntry
 import com.example.engine.TelemetryState
@@ -34,6 +37,7 @@ import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.sqrt
 
 class SpatialViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -65,6 +69,9 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
 
   private val _showSettings = MutableStateFlow(false)
   val showSettings: StateFlow<Boolean> = _showSettings.asStateFlow()
+
+  private val _showMarkerGuide = MutableStateFlow(false)
+  val showMarkerGuide: StateFlow<Boolean> = _showMarkerGuide.asStateFlow()
 
   private val _showDiagnostics = MutableStateFlow(false)
   val showDiagnostics: StateFlow<Boolean> = _showDiagnostics.asStateFlow()
@@ -99,8 +106,13 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   private val _telemetry = MutableStateFlow(TelemetryState())
   val telemetry: StateFlow<TelemetryState> = _telemetry.asStateFlow()
 
+  // Active Multi-Object Scene Anchors
   private val _arAnchors = MutableStateFlow<List<SpatialAnchor>>(emptyList())
   val arAnchors: StateFlow<List<SpatialAnchor>> = _arAnchors.asStateFlow()
+
+  // Nearby Exhibit when walking close to a placed model (<1.8m)
+  private val _nearbyExhibit = MutableStateFlow<SpatialAnchor?>(null)
+  val nearbyExhibit: StateFlow<SpatialAnchor?> = _nearbyExhibit.asStateFlow()
 
   private val _toastEvents = MutableSharedFlow<String>()
   val toastEvents: SharedFlow<String> = _toastEvents.asSharedFlow()
@@ -120,7 +132,7 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     _displayMode.value = mode
     val modeName = when (mode) {
       DisplayMode.MR -> "MR Native Stereo Mode Activated"
-      DisplayMode.AR -> "AR 6DoF Spatial Tracking Activated"
+      DisplayMode.AR -> "AR 6DoF Image & Plane Tracking Activated"
       DisplayMode.OBJECT -> "3D Filament Studio Activated"
     }
     emitToast(modeName)
@@ -174,27 +186,42 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     }
   }
 
-  fun addPlacedAnchor(anchorId: String, worldPos: FloatArray) {
-    val model = _selectedModel.value ?: return
+  fun addPlacedAnchor(
+    anchorId: String,
+    worldPos: FloatArray,
+    source: ExhibitSource = ExhibitSource.PLANE_TAP,
+    modelId: String = _selectedModel.value?.id ?: "drone_v1",
+    modelTitle: String = _selectedModel.value?.title ?: "3D Exhibit",
+    markerId: String? = null
+  ) {
     val newAnchor = SpatialAnchor(
       id = anchorId,
       posX = worldPos[0],
       posY = worldPos[1],
       posZ = worldPos[2],
       rotY = 0f,
-      modelId = model.id
+      modelId = modelId,
+      modelTitle = modelTitle,
+      source = source,
+      markerId = markerId
     )
     _arAnchors.update { it + newAnchor }
     _telemetry.update { it.copy(activeAnchorsCount = _arAnchors.value.size) }
-    emitToast("Spatial Anchor Placed (${_arAnchors.value.size})")
-    log("ARCORE_ANCHOR", "Pinned anchor at (%.2f, %.2f, %.2f)".format(worldPos[0], worldPos[1], worldPos[2]))
+
+    val msg = if (source == ExhibitSource.IMAGE_MARKER) {
+      "🎯 Image Marker Tracked: $modelTitle"
+    } else {
+      "📍 Plane Anchor Placed: $modelTitle"
+    }
+    emitToast(msg)
+    log("SPATIAL_ANCHOR", "Pinned $modelTitle via $source at (%.2f, %.2f, %.2f)".format(worldPos[0], worldPos[1], worldPos[2]))
   }
 
   fun removeAnchor(anchorId: String) {
     _arAnchors.update { it.filterNot { a -> a.id == anchorId } }
     _telemetry.update { it.copy(activeAnchorsCount = _arAnchors.value.size) }
-    emitToast("Anchor Removed")
-    log("ARCORE_ANCHOR", "Removed anchor: $anchorId")
+    emitToast("Exhibit Anchor Removed")
+    log("SPATIAL_ANCHOR", "Removed anchor: $anchorId")
   }
 
   fun toggleRecording() {
@@ -237,18 +264,27 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     }
   }
 
-  fun resetOrRestoreModel() {
+  fun clearActiveModelAndScene() {
+    _selectedModel.value = null
+    _activeGlbBuffer.value = null
     _arAnchors.value = emptyList()
-    if (_selectedModel.value == null) {
-      _selectedModel.value = _modelsList.value.firstOrNull()
-      _activeGlbBuffer.value = _modelsList.value.firstOrNull()?.let { GltfAssetFactory.getPresetGlbBuffer(it.id) }
-      emitToast("Default Model Restored")
-      log("SCENE", "Restored default model and cleared anchors")
-    } else {
-      emitToast("Pose & Anchors Reset")
-      log("SCENE", "Reset transforms and anchors")
+    _nearbyExhibit.value = null
+    _isPlayingAnimation.value = false
+    _currentAnimationTimeSec.value = 0f
+    _telemetry.update {
+      it.copy(
+        activeAnchorsCount = 0,
+        vertexCount = 0,
+        triangleCount = 0,
+        metricDimensions = "None (Scene Cleared)"
+      )
     }
-    _telemetry.update { it.copy(activeAnchorsCount = 0) }
+    emitToast("Model and Scene Cleared")
+    log("SCENE", "Active model and all spatial anchors cleared from scene")
+  }
+
+  fun resetOrRestoreModel() {
+    clearActiveModelAndScene()
   }
 
   fun scrubAnimation(timeSec: Float) {
@@ -263,6 +299,7 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
 
   fun setShowModelSelector(show: Boolean) { _showModelSelector.value = show }
   fun setShowSettings(show: Boolean) { _showSettings.value = show }
+  fun setShowMarkerGuide(show: Boolean) { _showMarkerGuide.value = show }
   fun setShowDiagnostics(show: Boolean) { _showDiagnostics.value = show }
   fun setShowGridFloor(show: Boolean) { _showGridFloor.value = show }
   fun setAutoRotate(auto: Boolean) { _autoRotate.value = auto }
@@ -280,6 +317,29 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     depthManager: DepthOcclusionManager? = null,
     modelDimensions: String = "1.00m x 0.85m x 1.10m (1:1 Scale)"
   ) {
+    // Update distances from camera to anchors
+    val camPos = trackingData.cameraPosition
+    var closest: SpatialAnchor? = null
+    var minDistance = Float.MAX_VALUE
+
+    if (trackingData.trackingState == TrackingState.TRACKING && _arAnchors.value.isNotEmpty()) {
+      val updatedList = _arAnchors.value.map { anchor ->
+        val dx = anchor.posX - camPos[0]
+        val dy = anchor.posY - camPos[1]
+        val dz = anchor.posZ - camPos[2]
+        val dist = sqrt(dx * dx + dy * dy + dz * dz)
+        if (dist < minDistance) {
+          minDistance = dist
+          closest = anchor.copy(distanceToCameraMeters = dist)
+        }
+        anchor.copy(distanceToCameraMeters = dist)
+      }
+      _arAnchors.value = updatedList
+      _nearbyExhibit.value = if (minDistance < 2.2f) closest else null
+    } else {
+      _nearbyExhibit.value = null
+    }
+
     _telemetry.update {
       it.copy(
         fps = fps,
@@ -293,6 +353,8 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         },
         horizontalPlanesCount = trackingData.horizontalPlanesCount,
         verticalPlanesCount = trackingData.verticalPlanesCount,
+        trackedImagesCount = trackingData.detectedImages.size,
+        walkingDisplacementMeters = trackingData.walkingDisplacementMeters,
         lightIntensityLumens = trackingData.lightIntensityLumens,
         isDepthEnabled = trackingData.isDepthEnabled,
         depthMinMeters = depthManager?.minDepthMeters ?: it.depthMinMeters,

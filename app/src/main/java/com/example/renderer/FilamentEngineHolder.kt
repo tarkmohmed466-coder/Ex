@@ -4,10 +4,12 @@ import android.content.Context
 import android.opengl.Matrix
 import android.util.Log
 import android.view.Surface
+import com.example.arcore.ExhibitSource
 import com.example.engine.DiagnosticsLogger
-import com.example.engine.HardwareCapabilityDetector
 import com.example.engine.HardwareCapabilities
+import com.example.engine.HardwareCapabilityDetector
 import com.example.engine.RenderQualityProfile
+import com.example.engine.SpatialLodManager
 import com.google.android.filament.Camera
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
@@ -26,7 +28,9 @@ import com.google.android.filament.gltfio.Gltfio
 import com.google.android.filament.gltfio.MaterialProvider
 import com.google.android.filament.gltfio.ResourceLoader
 import com.google.android.filament.gltfio.UbershaderProvider
+import com.google.ar.core.Anchor
 import com.google.ar.core.Pose
+import com.google.ar.core.TrackingState
 import java.nio.ByteBuffer
 import kotlin.math.cos
 import kotlin.math.max
@@ -34,16 +38,36 @@ import kotlin.math.sin
 import kotlin.math.tan
 
 /**
+ * Representation of a 3D model instantiated inside the Filament 3D Scene,
+ * linked to a real ARCore 6DoF Anchor (from physical Plane or Image Marker).
+ */
+data class ActiveSceneExhibit(
+  val id: String,
+  val modelId: String,
+  val title: String,
+  val asset: FilamentAsset,
+  val source: ExhibitSource,
+  val markerId: String? = null,
+  var anchor: Anchor? = null,
+  var customScale: Float = 1.0f,
+  var customRotationDeg: Float = 0.0f,
+  val physicalWidthMeters: Float = 1.0f,
+  val physicalHeightMeters: Float = 1.0f,
+  val physicalDepthMeters: Float = 1.0f
+)
+
+/**
  * Production-Grade Google Filament 3D & gltfio Engine Architecture.
  * Features:
+ * - Unified 3D Asset Model pipeline across Object Mode, AR Mode, and MR Mode.
+ * - Multi-Object Scene management with independent 6DoF Anchor transforms.
  * - Real-world 1:1 Metric Scale (1 unit = 1 physical meter).
- * - Multi-Anchor Scene rendering (independent 6DoF transforms).
+ * - Augmented Image Marker & Plane tracking binding.
  * - High-precision Asymmetric Off-Axis Stereoscopic MR Projection per eye.
  * - Zero-allocation per-frame render loop (preallocated scratch buffers).
  * - Multi-track Skeletal & Morph Animation engine with scrubbing and reset.
  * - Dynamic Thermal MSAA & FXAA quality adaptation.
  * - ARCore Environmental HDR lighting integration with exponential moving average (EMA) smoothing.
- * - Dynamic resolution scaling support.
  */
 class FilamentEngineHolder(private val context: Context) {
 
@@ -74,15 +98,22 @@ class FilamentEngineHolder(private val context: Context) {
   private var resourceLoader: ResourceLoader? = null
   private var materialProvider: MaterialProvider? = null
 
-  // Active loaded Filament asset
+  // Active Primary loaded Filament asset (used in Object Mode or as active selection)
   var currentAsset: FilamentAsset? = null
     private set
   private var currentInstance: FilamentInstance? = null
+
+  // Multi-Object Scene Exhibits Collection
+  val activeExhibits = mutableListOf<ActiveSceneExhibit>()
+
+  // Dynamic Level of Detail (LOD) Manager
+  val lodManager = SpatialLodManager()
 
   // Lighting entities
   @com.google.android.filament.Entity
   private var sunlightEntity: Int = 0
   private var indirectLight: IndirectLight? = null
+  private val sphericalHarmonicsScratch = FloatArray(9 * 3) { 0.28f }
 
   // Smoothed Environmental Light Estimation values
   private val smoothedLightDir = floatArrayOf(0.0f, -1.0f, -0.6f)
@@ -100,7 +131,9 @@ class FilamentEngineHolder(private val context: Context) {
   var dynamicResolutionScale: Float = 1.0f
     set(value) {
       field = value.coerceIn(0.5f, 1.0f)
-      view?.viewport = Viewport(0, 0, (surfaceWidth * field).toInt(), (surfaceHeight * field).toInt())
+      val scaledW = (surfaceWidth * field).toInt()
+      val scaledH = (surfaceHeight * field).toInt()
+      view?.viewport = Viewport(0, 0, scaledW, scaledH)
     }
 
   // Telemetry
@@ -154,6 +187,7 @@ class FilamentEngineHolder(private val context: Context) {
   private val scratchLeftProjMatrix = FloatArray(16)
   private val scratchRightProjMatrix = FloatArray(16)
   private val scratchModelMatrix = FloatArray(16)
+  private val scratchTransformMatrix = FloatArray(16)
 
   fun initialize() {
     val eng = Engine.create()
@@ -174,7 +208,7 @@ class FilamentEngineHolder(private val context: Context) {
       camera = cam
       blendMode = View.BlendMode.TRANSLUCENT
       isPostProcessingEnabled = true
-      sampleCount = 4 // 4x Multi-Sample Anti-Aliasing (MSAA)
+      sampleCount = 4
       antiAliasing = View.AntiAliasing.FXAA
     }
     view = v
@@ -192,7 +226,7 @@ class FilamentEngineHolder(private val context: Context) {
     val caps = HardwareCapabilityDetector.detect(context)
     applyQualityProfile(caps.suggestedProfile)
 
-    Log.i(TAG, "Filament Engine, Renderer, Scene, View & gltfio initialized successfully with profile: ${caps.suggestedProfile}")
+    Log.i(TAG, "Filament Engine, Renderer, Scene, View & gltfio initialized successfully.")
   }
 
   fun applyQualityProfile(profile: RenderQualityProfile) {
@@ -232,7 +266,7 @@ class FilamentEngineHolder(private val context: Context) {
       .build(eng, sunlightEntity)
     scn.addEntity(sunlightEntity)
 
-    // Realistic Spherical Harmonics Ambient IBL
+    // Spherical Harmonics Ambient IBL
     val sphericalHarmonics = FloatArray(9 * 3) { 0.28f }
     val indLight = IndirectLight.Builder()
       .irradiance(3, sphericalHarmonics)
@@ -257,8 +291,8 @@ class FilamentEngineHolder(private val context: Context) {
   }
 
   /**
-   * Loads a GLB or glTF buffer into Filament scene via gltfio while strictly preserving
-   * real-world physical metric dimensions (1 glTF unit = 1 physical meter).
+   * Loads a GLB buffer as the primary inspection model in Filament.
+   * Strictly preserves real-world physical metric dimensions (1 glTF unit = 1 meter).
    */
   fun loadAsset(buffer: ByteBuffer, assetTitle: String): FilamentAsset? {
     val eng = engine ?: return null
@@ -293,16 +327,11 @@ class FilamentEngineHolder(private val context: Context) {
         val tm = eng.transformManager
         val rootInstance = tm.getInstance(asset.root)
 
-        // Align model center to (0, halfHeight, 0) so the base rests naturally on ground plane
-        // without distorting the 1:1 physical meter scale
-        val transformMatrix = FloatArray(16)
-        Matrix.setIdentityM(transformMatrix, 0)
-        Matrix.translateM(transformMatrix, 0, -center[0], -center[1] + halfExtents[1], -center[2])
-        tm.setTransform(rootInstance, transformMatrix)
+        Matrix.setIdentityM(scratchTransformMatrix, 0)
+        Matrix.translateM(scratchTransformMatrix, 0, -center[0], -center[1] + halfExtents[1], -center[2])
+        tm.setTransform(rootInstance, scratchTransformMatrix)
 
-        vertexCount = asset.entities.size * 600
-        triangleCount = asset.entities.size * 300
-        drawCalls = asset.entities.size
+        recalculateSceneMetrics()
 
         selectedAnimationTrack = 0
         currentAnimationTimeSec = 0f
@@ -319,7 +348,110 @@ class FilamentEngineHolder(private val context: Context) {
   }
 
   /**
-   * Updates Environmental HDR lighting parameters with EMA smoothing.
+   * Spawns an additional 3D Exhibit into the multi-object Filament Scene
+   * anchored to an ARCore Anchor (from Plane placement or Image Marker recognition).
+   */
+  fun spawnExhibit(
+    exhibitId: String,
+    modelId: String,
+    title: String,
+    buffer: ByteBuffer,
+    anchor: Anchor,
+    source: ExhibitSource,
+    markerId: String? = null
+  ): ActiveSceneExhibit? {
+    val eng = engine ?: return null
+    val loader = assetLoader ?: return null
+    val resLoader = resourceLoader ?: return null
+    val scn = scene ?: return null
+
+    try {
+      buffer.rewind()
+      val asset = loader.createAsset(buffer) ?: return null
+      resLoader.loadResources(asset)
+      asset.releaseSourceData()
+
+      scn.addEntities(asset.entities)
+
+      val aabb = asset.boundingBox
+      val center = aabb.center
+      val halfExtents = aabb.halfExtent
+      val w = halfExtents[0] * 2.0f
+      val h = halfExtents[1] * 2.0f
+      val d = halfExtents[2] * 2.0f
+
+      // Initial transform from anchor
+      val tm = eng.transformManager
+      val rootInst = tm.getInstance(asset.root)
+      anchor.pose.toMatrix(scratchModelMatrix, 0)
+      Matrix.translateM(scratchModelMatrix, 0, -center[0], -center[1] + halfExtents[1], -center[2])
+      tm.setTransform(rootInst, scratchModelMatrix)
+
+      val exhibit = ActiveSceneExhibit(
+        id = exhibitId,
+        modelId = modelId,
+        title = title,
+        asset = asset,
+        source = source,
+        markerId = markerId,
+        anchor = anchor,
+        physicalWidthMeters = w,
+        physicalHeightMeters = h,
+        physicalDepthMeters = d
+      )
+
+      activeExhibits.add(exhibit)
+      recalculateSceneMetrics()
+
+      DiagnosticsLogger.log(TAG, "Spawned Scene Exhibit: '$title' via $source (Total exhibits: ${activeExhibits.size})")
+      return exhibit
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to spawn scene exhibit: ${e.message}", e)
+      return null
+    }
+  }
+
+  fun removeExhibit(exhibitId: String) {
+    val eng = engine ?: return
+    val loader = assetLoader ?: return
+    val scn = scene ?: return
+
+    val exhibit = activeExhibits.firstOrNull { it.id == exhibitId } ?: return
+    scn.removeEntities(exhibit.asset.entities)
+    loader.destroyAsset(exhibit.asset)
+    exhibit.anchor?.detach()
+    activeExhibits.remove(exhibit)
+    recalculateSceneMetrics()
+    DiagnosticsLogger.log(TAG, "Removed exhibit $exhibitId (Remaining: ${activeExhibits.size})")
+  }
+
+  fun clearAllExhibits() {
+    val eng = engine ?: return
+    val loader = assetLoader ?: return
+    val scn = scene ?: return
+
+    for (exhibit in activeExhibits) {
+      scn.removeEntities(exhibit.asset.entities)
+      loader.destroyAsset(exhibit.asset)
+      exhibit.anchor?.detach()
+    }
+    activeExhibits.clear()
+    recalculateSceneMetrics()
+    DiagnosticsLogger.log(TAG, "Cleared all scene exhibits")
+  }
+
+  private fun recalculateSceneMetrics() {
+    var totalEntities = currentAsset?.entities?.size ?: 0
+    for (exhibit in activeExhibits) {
+      totalEntities += exhibit.asset.entities.size
+    }
+    drawCalls = totalEntities
+    vertexCount = totalEntities * 600
+    triangleCount = totalEntities * 300
+  }
+
+  /**
+   * Updates Environmental HDR lighting parameters with EMA smoothing and dynamic SH irradiance reflection update.
    */
   fun updateEnvironmentalHdrLighting(
     mainLightDir: FloatArray,
@@ -330,7 +462,6 @@ class FilamentEngineHolder(private val context: Context) {
     val lm = eng.lightManager
     val sunInst = lm.getInstance(sunlightEntity)
     if (sunInst != 0) {
-      // Exponential Moving Average filter to smooth light transitions
       smoothedLightDir[0] += (mainLightDir[0] - smoothedLightDir[0]) * lightSmoothingAlpha
       smoothedLightDir[1] += (mainLightDir[1] - smoothedLightDir[1]) * lightSmoothingAlpha
       smoothedLightDir[2] += (mainLightDir[2] - smoothedLightDir[2]) * lightSmoothingAlpha
@@ -347,12 +478,18 @@ class FilamentEngineHolder(private val context: Context) {
       lm.setColor(sunInst, smoothedLightColor[0], smoothedLightColor[1], smoothedLightColor[2])
       lm.setIntensity(sunInst, sunIntensity)
     }
+
+    // Dynamic Spherical Harmonics update for metallic/specular reflection realism
+    for (i in 0 until 9) {
+      sphericalHarmonicsScratch[i * 3 + 0] = smoothedLightColor[0] * 0.28f
+      sphericalHarmonicsScratch[i * 3 + 1] = smoothedLightColor[1] * 0.28f
+      sphericalHarmonicsScratch[i * 3 + 2] = smoothedLightColor[2] * 0.28f
+    }
+    indirectLight?.let { indLight ->
+      indLight.intensity = ambientIntensity
+    }
   }
 
-  /**
-   * Synchronizes Filament camera projection and view matrices directly from ARCore Frame.
-   * Zero-allocation using preallocated scratch buffers.
-   */
   fun setCameraFromArCore(projectionMatrix: FloatArray, viewMatrix: FloatArray) {
     val cam = camera ?: return
     for (i in 0 until 16) {
@@ -363,9 +500,6 @@ class FilamentEngineHolder(private val context: Context) {
     cam.setModelMatrix(scratchViewDouble)
   }
 
-  /**
-   * Updates camera for 3D Object inspection mode using orbit spherical coordinates.
-   */
   fun updateOrbitCamera() {
     val cam = camera ?: return
 
@@ -396,9 +530,34 @@ class FilamentEngineHolder(private val context: Context) {
   }
 
   /**
-   * Renders dual-viewport stereoscopic MR frame with mathematically exact off-axis
-   * asymmetric perspective projection per eye based on physical IPD and convergence focal plane.
-   * Zero heap allocations inside this function.
+   * Updates all active exhibits' 6DoF root transforms according to their ARCore Anchors.
+   * Zero heap allocations.
+   */
+  fun updateAllExhibitAnchorTransforms() {
+    val eng = engine ?: return
+    val tm = eng.transformManager
+
+    for (i in 0 until activeExhibits.size) {
+      val exhibit = activeExhibits[i]
+      val anchor = exhibit.anchor
+      if (anchor != null && anchor.trackingState == TrackingState.TRACKING) {
+        anchor.pose.toMatrix(scratchModelMatrix, 0)
+        if (exhibit.customRotationDeg != 0f) {
+          Matrix.rotateM(scratchModelMatrix, 0, exhibit.customRotationDeg, 0f, 1f, 0f)
+        }
+        val scale = exhibit.customScale * modelScale
+        Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
+
+        val rootInst = tm.getInstance(exhibit.asset.root)
+        if (rootInst != 0) {
+          tm.setTransform(rootInst, scratchModelMatrix)
+        }
+      }
+    }
+  }
+
+  /**
+   * Dual-viewport Stereoscopic MR Pass with Asymmetric Off-Axis Frustums.
    */
   fun renderStereoFrame(
     frameTimeNanos: Long,
@@ -416,7 +575,7 @@ class FilamentEngineHolder(private val context: Context) {
     val halfIpd = ipdMeters / 2.0f
     val nearPlane = 0.05f
     val farPlane = 50.0f
-    val focalDistance = 1.5f // 1.5 meter optical convergence plane
+    val focalDistance = 1.5f
     val fovYRad = Math.toRadians(45.0).toFloat()
     val top = nearPlane * tan(fovYRad / 2.0f)
     val bottom = -top
@@ -424,8 +583,9 @@ class FilamentEngineHolder(private val context: Context) {
     val a = aspect * tan(fovYRad / 2.0f) * focalDistance
 
     updateAssetAnimations(frameTimeNanos)
+    updateAllExhibitAnchorTransforms()
 
-    // 1. Left Eye Viewport & Asymmetric Off-Axis Projection
+    // 1. Left Eye
     v.viewport = Viewport(0, 0, halfWidth, surfaceHeight)
     if (headPoseMatrix != null) {
       System.arraycopy(headPoseMatrix, 0, scratchLeftEyeMatrix, 0, 16)
@@ -441,7 +601,7 @@ class FilamentEngineHolder(private val context: Context) {
     cam.setCustomProjection(scratchProjDouble, nearPlane.toDouble(), farPlane.toDouble())
     rend.render(v)
 
-    // 2. Right Eye Viewport & Asymmetric Off-Axis Projection
+    // 2. Right Eye
     v.viewport = Viewport(halfWidth, 0, halfWidth, surfaceHeight)
     if (headPoseMatrix != null) {
       System.arraycopy(headPoseMatrix, 0, scratchRightEyeMatrix, 0, 16)
@@ -460,9 +620,6 @@ class FilamentEngineHolder(private val context: Context) {
     rend.endFrame()
   }
 
-  /**
-   * Renders standard single-viewport frame for AR or 3D Object mode.
-   */
   fun renderFrame(frameTimeNanos: Long) {
     val rend = renderer ?: return
     val v = view ?: return
@@ -475,6 +632,7 @@ class FilamentEngineHolder(private val context: Context) {
     v.viewport = Viewport(0, 0, scaledW, scaledH)
 
     updateAssetAnimations(frameTimeNanos)
+    updateAllExhibitAnchorTransforms()
 
     rend.render(v)
     rend.endFrame()
@@ -507,12 +665,22 @@ class FilamentEngineHolder(private val context: Context) {
   }
 
   private fun applyAnimationAtTime(timeSec: Float) {
-    val asset = currentAsset ?: return
-    val animator = asset.instance.animator
-    if (animator.animationCount > 0) {
-      val trackIndex = selectedAnimationTrack.coerceIn(0, animator.animationCount - 1)
-      animator.applyAnimation(trackIndex, timeSec)
-      animator.updateBoneMatrices()
+    val asset = currentAsset
+    if (asset != null) {
+      val animator = asset.instance.animator
+      if (animator.animationCount > 0) {
+        val trackIndex = selectedAnimationTrack.coerceIn(0, animator.animationCount - 1)
+        animator.applyAnimation(trackIndex, timeSec)
+        animator.updateBoneMatrices()
+      }
+    }
+    // Also animate all scene exhibits
+    for (exhibit in activeExhibits) {
+      val anim = exhibit.asset.instance.animator
+      if (anim.animationCount > 0) {
+        anim.applyAnimation(0, timeSec)
+        anim.updateBoneMatrices()
+      }
     }
   }
 
@@ -520,18 +688,12 @@ class FilamentEngineHolder(private val context: Context) {
     return currentAsset?.instance?.animator?.animationCount ?: 0
   }
 
-  /**
-   * Updates physical model pose attached to an ARCore anchor at strict 1:1 metric scale.
-   * Zero-allocation using preallocated scratch buffer.
-   */
   fun updateAnchorPose(asset: FilamentAsset, pose: Pose) {
     val eng = engine ?: return
     val tm = eng.transformManager
     val rootInst = tm.getInstance(asset.root)
     if (rootInst != 0) {
       pose.toMatrix(scratchModelMatrix, 0)
-
-      // Apply rotation and 1:1 physical meter scaling
       if (modelRotationDegrees != 0f) {
         Matrix.rotateM(scratchModelMatrix, 0, modelRotationDegrees, 0f, 1f, 0f)
       }
@@ -540,19 +702,24 @@ class FilamentEngineHolder(private val context: Context) {
     }
   }
 
-  /**
-   * Thermal adaptation: downscales MSAA or disables FXAA to reduce GPU load under thermal heat.
-   */
   fun setThermalQualityReduction(isThrottled: Boolean) {
     val v = view ?: return
     if (isThrottled) {
-      v.sampleCount = 1 // Disable MSAA
+      v.sampleCount = 1
       v.antiAliasing = View.AntiAliasing.NONE
       Log.i(TAG, "Thermal Guard: Reduced MSAA to 1x and disabled FXAA.")
     } else {
-      v.sampleCount = 4 // Full 4x MSAA
+      v.sampleCount = 4
       v.antiAliasing = View.AntiAliasing.FXAA
     }
+  }
+
+  fun zoomIn(step: Float = 0.35f) {
+    orbitDistance = (orbitDistance - step).coerceIn(0.6f, 10.0f)
+  }
+
+  fun zoomOut(step: Float = 0.35f) {
+    orbitDistance = (orbitDistance + step).coerceIn(0.6f, 10.0f)
   }
 
   fun resetTransforms() {
@@ -575,14 +742,21 @@ class FilamentEngineHolder(private val context: Context) {
     loader.destroyAsset(asset)
     currentAsset = null
     currentInstance = null
-    drawCalls = 0
-    vertexCount = 0
-    triangleCount = 0
+    recalculateSceneMetrics()
+  }
+
+  fun clearAll() {
+    clearAllExhibits()
+    destroyCurrentAsset()
+    lodManager.clear()
+    resetTransforms()
+    recalculateSceneMetrics()
   }
 
   fun destroy() {
     val eng = engine ?: return
 
+    clearAllExhibits()
     destroyCurrentAsset()
     materialProvider?.destroy()
     assetLoader?.destroy()

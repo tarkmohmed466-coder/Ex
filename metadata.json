@@ -1,6 +1,6 @@
 {
   "name": "Mixed Reality",
-  "description": "Mixed Reality 3D, AR, and MR spatial viewer with GLB rendering, stereo MR mode, and interactive controls.",
+  "description": "Unified 3D, AR, and MR spatial computing engine with Google Filament gltfio, ARCore Augmented Image tracking, Plane anchoring, multi-exhibit persistence, and off-axis stereo MR.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

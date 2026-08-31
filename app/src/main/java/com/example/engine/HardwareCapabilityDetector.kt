@@ -45,11 +45,15 @@ object HardwareCapabilityDetector {
 
     // Display refresh rate
     val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
-    val refreshRate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      context.display?.refreshRate ?: 60f
-    } else {
-      @Suppress("DEPRECATION")
-      windowManager?.defaultDisplay?.refreshRate ?: 60f
+    val refreshRate = try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        context.display?.refreshRate ?: 60f
+      } else {
+        @Suppress("DEPRECATION")
+        windowManager?.defaultDisplay?.refreshRate ?: 60f
+      }
+    } catch (_: Exception) {
+      60f
     }
 
     // ARCore availability

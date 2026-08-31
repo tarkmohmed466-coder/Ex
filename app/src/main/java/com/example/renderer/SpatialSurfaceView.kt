@@ -16,10 +16,15 @@ import android.view.SurfaceView
 import com.example.arcore.ArCoreSessionManager
 import com.example.arcore.ArCoreTrackingData
 import com.example.arcore.DepthOcclusionManager
+import com.example.arcore.ExhibitMarker
+import com.example.arcore.ExhibitSource
+import com.example.arcore.ImageMarkerCatalog
 import com.example.engine.DiagnosticsLogger
 import com.example.engine.TwoFingerRotateDetector
 import com.example.model.DisplayMode
+import com.example.parser.GltfAssetFactory
 import com.google.ar.core.Anchor
+import com.google.ar.core.AugmentedImage
 import com.google.ar.core.Pose
 import com.google.ar.core.TrackingState
 import java.nio.ByteBuffer
@@ -30,9 +35,10 @@ import kotlin.math.abs
  * Supports:
  * - 60+ FPS Choreographer-driven rendering with zero allocations in doFrame.
  * - ARCore 6DoF Camera synchronization & plane anchoring.
+ * - Image Target Recognition & Automatic 3D Exhibit Spawning & Anchoring.
+ * - Multi-Object Scene persistence while walking in 6DoF space.
  * - Real 16-bit Depth extraction & Depth Occlusion processing.
  * - Real-world 1:1 Metric Scale (1 unit = 1 physical meter).
- * - Multi-Anchor spatial management.
  * - Dual-Viewport Asymmetric Off-Axis Stereoscopic MR Pipeline.
  * - Two-finger rotation, pan, pinch zoom gestures.
  * - Hardware PixelCopy frame snapshots.
@@ -68,6 +74,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
   // Active Placed Anchors mapped to ARCore Anchor instances
   val activeArAnchors = mutableListOf<Anchor>()
 
+  // Set of already spawned image markers to prevent duplicate spawning
+  private val spawnedMarkerIds = mutableSetOf<String>()
+
   // Gesture Detectors
   private val scaleGestureDetector: ScaleGestureDetector
   private val rotateGestureDetector: TwoFingerRotateDetector
@@ -76,9 +85,17 @@ class SpatialSurfaceView @JvmOverloads constructor(
   private var activePointerCount = 0
   private var touchStartTime = 0L
 
-  // Telemetry callback
+  // Current selected model ID for manual plane tap-placement
+  var currentSelectedModelId: String = "drone_v1"
+  var currentSelectedModelTitle: String = "Autonomous Drone X-1"
+
+  // User Configured Interpupillary Distance (IPD) in millimeters for Stereoscopic MR
+  var userIpdMm: Float = 64.0f
+
+  // Telemetry and Event callbacks
   var onTelemetryUpdate: ((fps: Float, drawCalls: Int, vertexCount: Int, trackingData: ArCoreTrackingData) -> Unit)? = null
-  var onAnchorPlaced: ((Anchor, FloatArray) -> Unit)? = null
+  var onAnchorPlaced: ((Anchor, FloatArray, ExhibitSource, String, String) -> Unit)? = null
+  var onExhibitMarkerRecognized: ((ExhibitMarker, FloatArray) -> Unit)? = null
 
   // Latest AR tracking data
   private var latestTrackingData = ArCoreTrackingData()
@@ -105,6 +122,10 @@ class SpatialSurfaceView @JvmOverloads constructor(
       )
     }
 
+    arCoreSessionManager.onImageMarkerDetected = { image ->
+      handleAugmentedImageTracking(image)
+    }
+
     scaleGestureDetector = ScaleGestureDetector(
       context,
       object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -125,6 +146,44 @@ class SpatialSurfaceView @JvmOverloads constructor(
         filamentEngine.orbitYaw += deltaDegrees
       } else {
         filamentEngine.modelRotationDegrees += deltaDegrees
+      }
+    }
+  }
+
+  /**
+   * Handles ARCore AugmentedImage detection and binds it to its corresponding 3D Model Exhibit.
+   */
+  private fun handleAugmentedImageTracking(image: AugmentedImage) {
+    if (image.trackingState != TrackingState.TRACKING) return
+
+    val markerId = image.name
+    val marker = ImageMarkerCatalog.findByMarkerId(markerId) ?: return
+
+    if (!spawnedMarkerIds.contains(markerId)) {
+      spawnedMarkerIds.add(markerId)
+
+      val anchor = arCoreSessionManager.createAnchorForAugmentedImage(image)
+      if (anchor != null) {
+        activeArAnchors.add(anchor)
+        val glbBuffer = GltfAssetFactory.getPresetGlbBuffer(marker.modelId)
+        if (glbBuffer != null) {
+          val exhibitId = "exhibit_marker_${markerId}_${System.currentTimeMillis()}"
+          filamentEngine.spawnExhibit(
+            exhibitId = exhibitId,
+            modelId = marker.modelId,
+            title = marker.title,
+            buffer = glbBuffer,
+            anchor = anchor,
+            source = ExhibitSource.IMAGE_MARKER,
+            markerId = markerId
+          )
+
+          val pos = floatArrayOf(image.centerPose.tx(), image.centerPose.ty(), image.centerPose.tz())
+          onExhibitMarkerRecognized?.invoke(marker, pos)
+          onAnchorPlaced?.invoke(anchor, pos, ExhibitSource.IMAGE_MARKER, marker.modelId, marker.title)
+          Log.i(TAG, "Recognized Image Marker '${marker.title}' -> Spawned and Anchored 3D Exhibit at (${pos[0]}, ${pos[1]}, ${pos[2]})")
+          DiagnosticsLogger.log(TAG, "Image Marker Tracked: '${marker.title}' -> Placed 3D Object at (${pos[0]}, ${pos[1]}, ${pos[2]})")
+        }
       }
     }
   }
@@ -234,9 +293,27 @@ class SpatialSurfaceView @JvmOverloads constructor(
           }
           depthOcclusionManager.processFrameDepth(frame, scratchAnchorPoses)
 
-          // Update primary model pose attached to active anchor
+          // Evaluate Dynamic LOD per exhibit based on camera distance
+          val camPos = latestTrackingData.cameraPosition
+          for (exhibit in filamentEngine.activeExhibits) {
+            val anchor = exhibit.anchor
+            if (anchor != null && anchor.trackingState == TrackingState.TRACKING) {
+              val objPos = floatArrayOf(anchor.pose.tx(), anchor.pose.ty(), anchor.pose.tz())
+              val radius = maxOf(exhibit.physicalWidthMeters, exhibit.physicalHeightMeters) / 2.0f
+              filamentEngine.lodManager.evaluateLod(
+                exhibitId = exhibit.id,
+                cameraPos = camPos,
+                objectPos = objPos,
+                boundingRadiusMeters = radius,
+                screenWidthPx = width,
+                screenHeightPx = height
+              )
+            }
+          }
+
+          // If no multi-exhibits spawned yet, update the single selected asset at the primary anchor
           val currentAsset = filamentEngine.currentAsset
-          if (currentAsset != null && activeArAnchors.isNotEmpty()) {
+          if (currentAsset != null && filamentEngine.activeExhibits.isEmpty() && activeArAnchors.isNotEmpty()) {
             val primaryAnchor = activeArAnchors.lastOrNull()
             if (primaryAnchor != null && primaryAnchor.trackingState == TrackingState.TRACKING) {
               filamentEngine.updateAnchorPose(currentAsset, primaryAnchor.pose)
@@ -265,7 +342,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
           depthOcclusionManager.processFrameDepth(frame, scratchAnchorPoses)
         }
 
-        val ipdMeters = 0.064f // Default 64mm IPD
+        // Use user-calibrated IPD (e.g. 52mm - 74mm range)
+        val ipdMeters = (userIpdMm / 1000.0f).coerceIn(0.045f, 0.085f)
         filamentEngine.renderStereoFrame(
           frameTimeNanos,
           ipdMeters,
@@ -280,10 +358,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
   }
 
   override fun onTouchEvent(event: MotionEvent): Boolean {
-    // 1. Check two-finger rotate gesture
     val isRotating = rotateGestureDetector.onTouchEvent(event)
-
-    // 2. Check pinch-to-zoom scale gesture
     scaleGestureDetector.onTouchEvent(event)
 
     when (event.actionMasked) {
@@ -306,13 +381,11 @@ class SpatialSurfaceView @JvmOverloads constructor(
           val dy = event.y - lastTouchY
 
           if (event.pointerCount == 1) {
-            // Single finger orbit rotate
             if (displayMode == DisplayMode.OBJECT) {
               filamentEngine.orbitYaw += dx * 0.4f
               filamentEngine.orbitPitch = (filamentEngine.orbitPitch - dy * 0.4f).coerceIn(-85f, 85f)
             }
           } else if (event.pointerCount == 2) {
-            // Two finger pan
             if (displayMode == DisplayMode.OBJECT) {
               filamentEngine.panX += dx * 0.005f
               filamentEngine.panY -= dy * 0.005f
@@ -352,7 +425,22 @@ class SpatialSurfaceView @JvmOverloads constructor(
           activeArAnchors.add(anchor)
           val hitPose = hit.hitPose
           val posArr = floatArrayOf(hitPose.tx(), hitPose.ty(), hitPose.tz())
-          onAnchorPlaced?.invoke(anchor, posArr)
+
+          // Spawn as a new distinct scene exhibit on the plane
+          val glbBuffer = GltfAssetFactory.getPresetGlbBuffer(currentSelectedModelId)
+          if (glbBuffer != null) {
+            val exhibitId = "exhibit_plane_${System.currentTimeMillis()}"
+            filamentEngine.spawnExhibit(
+              exhibitId = exhibitId,
+              modelId = currentSelectedModelId,
+              title = currentSelectedModelTitle,
+              buffer = glbBuffer,
+              anchor = anchor,
+              source = ExhibitSource.PLANE_TAP
+            )
+          }
+
+          onAnchorPlaced?.invoke(anchor, posArr, ExhibitSource.PLANE_TAP, currentSelectedModelId, currentSelectedModelTitle)
           Log.i(TAG, "ARCore Anchor pinned on plane at: ${hitPose.tx()}, ${hitPose.ty()}, ${hitPose.tz()}")
           DiagnosticsLogger.log(TAG, "Placed Anchor at (${hitPose.tx()}, ${hitPose.ty()}, ${hitPose.tz()})")
         }
@@ -360,9 +448,6 @@ class SpatialSurfaceView @JvmOverloads constructor(
     }
   }
 
-  /**
-   * Captures the exact rendered hardware surface frame using Android PixelCopy.
-   */
   fun captureSnapshot(onCaptured: (Bitmap) -> Unit, onError: (String) -> Unit) {
     if (!isSurfaceReady || width <= 0 || height <= 0) {
       onError("Surface not ready for snapshot")
@@ -393,10 +478,25 @@ class SpatialSurfaceView @JvmOverloads constructor(
       anchor.detach()
     }
     activeArAnchors.clear()
+    spawnedMarkerIds.clear()
+    filamentEngine.clearAllExhibits()
+  }
+
+  fun clearModelAndScene() {
+    filamentEngine.clearAll()
+    for (anchor in activeArAnchors) {
+      anchor.detach()
+    }
+    activeArAnchors.clear()
+    spawnedMarkerIds.clear()
+    currentSelectedModelId = ""
+    currentSelectedModelTitle = ""
+    arCoreSessionManager.resetWalkingOrigin()
   }
 
   fun resetView() {
     filamentEngine.resetTransforms()
     clearAnchors()
+    arCoreSessionManager.resetWalkingOrigin()
   }
 }

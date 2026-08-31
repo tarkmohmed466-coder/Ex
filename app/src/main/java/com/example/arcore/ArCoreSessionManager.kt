@@ -5,6 +5,8 @@ import android.content.Context
 import android.util.Log
 import com.google.ar.core.Anchor
 import com.google.ar.core.ArCoreApk
+import com.google.ar.core.AugmentedImage
+import com.google.ar.core.AugmentedImageDatabase
 import com.google.ar.core.Camera
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
@@ -22,6 +24,19 @@ import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException
 import java.nio.FloatBuffer
+import kotlin.math.sqrt
+
+/**
+ * Information about a detected 2D physical image marker / exhibit card in 3D space.
+ */
+data class DetectedImageInfo(
+  val markerId: String,
+  val trackingState: TrackingState,
+  val centerPose: Pose,
+  val extentXMeters: Float,
+  val extentZMeters: Float,
+  val distanceToCameraMeters: Float = 0f
+)
 
 /**
  * Real ARCore tracking info updated per frame.
@@ -36,9 +51,12 @@ data class ArCoreTrackingData(
   val mainLightDirection: FloatArray = floatArrayOf(0f, -1f, -0.5f),
   val mainLightIntensity: FloatArray = floatArrayOf(1f, 1f, 1f),
   val cameraPose: Pose? = null,
+  val cameraPosition: FloatArray = floatArrayOf(0f, 0f, 0f),
+  val walkingDisplacementMeters: Float = 0f,
   val isDepthSupported: Boolean = false,
   val isDepthEnabled: Boolean = false,
-  val detectedPlanes: List<DetectedPlaneInfo> = emptyList()
+  val detectedPlanes: List<DetectedPlaneInfo> = emptyList(),
+  val detectedImages: List<DetectedImageInfo> = emptyList()
 )
 
 data class DetectedPlaneInfo(
@@ -52,7 +70,8 @@ data class DetectedPlaneInfo(
 
 /**
  * Production-grade ARCore session manager handling lifecycle, 6DoF tracking,
- * plane detection, environmental HDR light estimation, and depth sensing.
+ * plane detection, AugmentedImageDatabase tracking, environmental HDR light estimation,
+ * walking distance calculation, and depth sensing.
  */
 class ArCoreSessionManager(private val context: Context) {
 
@@ -74,7 +93,13 @@ class ArCoreSessionManager(private val context: Context) {
 
   private var userRequestedInstall = true
 
+  // Initial camera position for walking distance calculation
+  private var initialCameraPose: Pose? = null
+  private var totalWalkingDisplacement: Float = 0f
+
+  // Callbacks
   var onTrackingDataUpdated: ((ArCoreTrackingData) -> Unit)? = null
+  var onImageMarkerDetected: ((AugmentedImage) -> Unit)? = null
 
   /**
    * Checks if ARCore is supported on this device.
@@ -83,7 +108,6 @@ class ArCoreSessionManager(private val context: Context) {
     try {
       val availability = ArCoreApk.getInstance().checkAvailability(context)
       if (availability.isTransient) {
-        // Re-check after transient state
         onResult(availability.isSupported)
         return
       }
@@ -97,8 +121,29 @@ class ArCoreSessionManager(private val context: Context) {
   }
 
   /**
+   * Builds and populates the AugmentedImageDatabase with target marker cards from catalog.
+   */
+  private fun buildAugmentedImageDatabase(session: Session): AugmentedImageDatabase {
+    val imageDatabase = AugmentedImageDatabase(session)
+    for (exhibit in ImageMarkerCatalog.exhibits) {
+      try {
+        val bitmap = ImageMarkerCatalog.generateMarkerBitmap(exhibit)
+        val imageIndex = imageDatabase.addImage(
+          exhibit.markerId,
+          bitmap,
+          exhibit.physicalWidthMeters
+        )
+        Log.i(TAG, "Added marker to ARCore Image Database: ${exhibit.markerId} (Index $imageIndex, width ${exhibit.physicalWidthMeters}m)")
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed adding marker ${exhibit.markerId} to image database: ${e.message}")
+      }
+    }
+    return imageDatabase
+  }
+
+  /**
    * Initializes or resumes the ARCore Session with optimal configuration:
-   * Autofocus, Horizontal + Vertical planes, Environmental HDR, and Depth.
+   * Autofocus, Horizontal + Vertical planes, AugmentedImageDatabase, Environmental HDR, and Depth.
    */
   fun resumeSession(activity: Activity): Boolean {
     if (session == null) {
@@ -110,10 +155,13 @@ class ArCoreSessionManager(private val context: Context) {
         }
 
         val newSession = Session(activity)
+        val imageDatabase = buildAugmentedImageDatabase(newSession)
+
         val config = Config(newSession).apply {
           focusMode = Config.FocusMode.AUTO
           planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
           lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
+          augmentedImageDatabase = imageDatabase
 
           if (newSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
             depthMode = Config.DepthMode.AUTOMATIC
@@ -124,7 +172,7 @@ class ArCoreSessionManager(private val context: Context) {
         newSession.configure(config)
         session = newSession
         isConfigured = true
-        Log.i(TAG, "ARCore Session initialized with Environmental HDR & Depth: ${config.depthMode}")
+        Log.i(TAG, "ARCore Session configured with Environmental HDR, Depth: ${config.depthMode}, & ImageDatabase (${imageDatabase.numImages} targets)")
       } catch (e: UnavailableArcoreNotInstalledException) {
         Log.e(TAG, "ARCore not installed", e)
         return false
@@ -171,27 +219,23 @@ class ArCoreSessionManager(private val context: Context) {
       session?.close()
       session = null
       isConfigured = false
+      initialCameraPose = null
     } catch (e: Exception) {
       Log.w(TAG, "Error closing ARCore session: ${e.message}")
     }
   }
 
-  /**
-   * Sets the display geometry for ARCore camera aspect ratio and rotation.
-   */
   fun setDisplayGeometry(rotation: Int, width: Int, height: Int) {
     session?.setDisplayGeometry(rotation, width, height)
   }
 
-  /**
-   * Sets the OpenGL texture name used by ARCore for camera background streaming.
-   */
   fun setCameraTextureName(textureId: Int) {
     session?.setCameraTextureName(textureId)
   }
 
   /**
-   * Updates the ARCore session and processes tracking data, planes, and light estimation.
+   * Updates the ARCore session and processes tracking data, planes, augmented images,
+   * walking distance, and light estimation.
    */
   fun updateFrame(): Frame? {
     val currentSession = session ?: return null
@@ -199,7 +243,23 @@ class ArCoreSessionManager(private val context: Context) {
       val frame = currentSession.update()
       val camera = frame.camera
 
-      // Process light estimation
+      // Walking Camera Tracking & Displacement
+      val camPose = if (camera.trackingState == TrackingState.TRACKING) camera.pose else null
+      val camPos = floatArrayOf(camPose?.tx() ?: 0f, camPose?.ty() ?: 0f, camPose?.tz() ?: 0f)
+
+      if (camPose != null) {
+        if (initialCameraPose == null) {
+          initialCameraPose = camPose
+        } else {
+          val init = initialCameraPose!!
+          val dx = camPose.tx() - init.tx()
+          val dy = camPose.ty() - init.ty()
+          val dz = camPose.tz() - init.tz()
+          totalWalkingDisplacement = sqrt(dx * dx + dy * dy + dz * dz)
+        }
+      }
+
+      // Process Light Estimation
       val lightEstimate = frame.lightEstimate
       val colorCorrection = FloatArray(4) { 1f }
       if (lightEstimate.state == LightEstimate.State.VALID) {
@@ -217,7 +277,7 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
 
-      // Collect planes
+      // 1. Collect Planes
       val allPlanes = currentSession.getAllTrackables(Plane::class.java)
       var hPlanes = 0
       var vPlanes = 0
@@ -243,6 +303,35 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
 
+      // 2. Collect Augmented Image Markers
+      val allImages = currentSession.getAllTrackables(AugmentedImage::class.java)
+      val imageList = mutableListOf<DetectedImageInfo>()
+
+      for (image in allImages) {
+        if (image.trackingState == TrackingState.TRACKING) {
+          val imgPose = image.centerPose
+          val distToCam = if (camPose != null) {
+            val dx = imgPose.tx() - camPose.tx()
+            val dy = imgPose.ty() - camPose.ty()
+            val dz = imgPose.tz() - camPose.tz()
+            sqrt(dx * dx + dy * dy + dz * dz)
+          } else 0f
+
+          imageList.add(
+            DetectedImageInfo(
+              markerId = image.name,
+              trackingState = image.trackingState,
+              centerPose = imgPose,
+              extentXMeters = image.extentX,
+              extentZMeters = image.extentZ,
+              distanceToCameraMeters = distToCam
+            )
+          )
+
+          onImageMarkerDetected?.invoke(image)
+        }
+      }
+
       val trackingData = ArCoreTrackingData(
         trackingState = camera.trackingState,
         trackingFailureReason = camera.trackingFailureReason,
@@ -252,10 +341,13 @@ class ArCoreSessionManager(private val context: Context) {
         colorCorrectionRgb = colorCorrection,
         mainLightDirection = mainLightDir,
         mainLightIntensity = mainLightInt,
-        cameraPose = if (camera.trackingState == TrackingState.TRACKING) camera.pose else null,
+        cameraPose = camPose,
+        cameraPosition = camPos,
+        walkingDisplacementMeters = totalWalkingDisplacement,
         isDepthSupported = currentSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC),
         isDepthEnabled = currentSession.config.depthMode == Config.DepthMode.AUTOMATIC,
-        detectedPlanes = planeList
+        detectedPlanes = planeList,
+        detectedImages = imageList
       )
 
       onTrackingDataUpdated?.invoke(trackingData)
@@ -277,7 +369,6 @@ class ArCoreSessionManager(private val context: Context) {
         return hit
       }
     }
-    // Fallback to any valid hit if not inside polygon
     return hits.firstOrNull()
   }
 
@@ -294,6 +385,18 @@ class ArCoreSessionManager(private val context: Context) {
   }
 
   /**
+   * Creates a real persistent ARCore Anchor attached to an AugmentedImage at its centerPose.
+   */
+  fun createAnchorForAugmentedImage(image: AugmentedImage): Anchor? {
+    return try {
+      image.createAnchor(image.centerPose)
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to create ARCore Anchor on AugmentedImage ${image.name}", e)
+      null
+    }
+  }
+
+  /**
    * Creates a real persistent ARCore Anchor at a specific Pose.
    */
   fun createAnchorAtPose(pose: Pose): Anchor? {
@@ -304,5 +407,10 @@ class ArCoreSessionManager(private val context: Context) {
       Log.e(TAG, "Failed to create ARCore Anchor at pose", e)
       null
     }
+  }
+
+  fun resetWalkingOrigin() {
+    initialCameraPose = latestFrame?.camera?.pose
+    totalWalkingDisplacement = 0f
   }
 }

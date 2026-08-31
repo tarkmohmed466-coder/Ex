@@ -1,5 +1,6 @@
 package com.example.model
 
+import com.example.arcore.ExhibitSource
 import java.nio.FloatBuffer
 import java.nio.ShortBuffer
 
@@ -57,7 +58,7 @@ data class SpatialModel(
  */
 enum class DisplayMode {
   MR,     // Mixed Reality - Stereoscopic Dual-Viewport + Spatial tracking
-  AR,     // Augmented Reality - Passthrough camera + Plane tracking & Anchoring
+  AR,     // Augmented Reality - Passthrough camera + Plane & Image tracking & Anchoring
   OBJECT  // 3D Object inspection - Orbit, zoom, lighting & inspection
 }
 
@@ -72,5 +73,9 @@ data class SpatialAnchor(
   val rotY: Float,
   val scale: Float = 1.0f,
   val modelId: String,
+  val modelTitle: String = "",
+  val source: ExhibitSource = ExhibitSource.PLANE_TAP,
+  val markerId: String? = null,
+  val distanceToCameraMeters: Float = 0f,
   val timestamp: Long = System.currentTimeMillis()
 )

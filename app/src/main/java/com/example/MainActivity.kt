@@ -16,13 +16,18 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -46,15 +51,20 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.example.arcore.ExhibitSource
 import com.example.engine.HapticManager
 import com.example.model.DisplayMode
 import com.example.renderer.SpatialSurfaceView
 import com.example.ui.components.AnimationControlBar
 import com.example.ui.components.BottomActionPill
 import com.example.ui.components.DiagnosticsHud
+import com.example.ui.components.ExhibitMarkerGuideSheet
 import com.example.ui.components.ModelSelectorSheet
+import com.example.ui.components.NearbyExhibitOverlay
+import com.example.ui.components.ObjectZoomInspectWidget
 import com.example.ui.components.SettingsSheet
 import com.example.ui.components.TopModePill
 import com.example.ui.theme.MyApplicationTheme
@@ -123,6 +133,7 @@ fun MixedRealityScreen(
   val recordingDurationSec by viewModel.recordingDurationSec.collectAsState()
   val showModelSelector by viewModel.showModelSelector.collectAsState()
   val showSettings by viewModel.showSettings.collectAsState()
+  val showMarkerGuide by viewModel.showMarkerGuide.collectAsState()
   val showDiagnostics by viewModel.showDiagnostics.collectAsState()
   val showGridFloor by viewModel.showGridFloor.collectAsState()
   val autoRotate by viewModel.autoRotate.collectAsState()
@@ -134,10 +145,13 @@ fun MixedRealityScreen(
   val sunIntensity by viewModel.sunIntensity.collectAsState()
   val ipdMm by viewModel.ipdMm.collectAsState()
   val telemetry by viewModel.telemetry.collectAsState()
+  val nearbyExhibit by viewModel.nearbyExhibit.collectAsState()
+  val arAnchors by viewModel.arAnchors.collectAsState()
 
   // Sheet states
   val modelSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   val settingsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  val markerSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
   // Camera Permission state for AR/MR passthrough
   var hasCameraPermission by remember {
@@ -176,8 +190,17 @@ fun MixedRealityScreen(
           modelDimensions = dims
         )
       }
-      onAnchorPlaced = { anchor, hitPos ->
-        viewModel.addPlacedAnchor("anchor_${anchor.hashCode()}", hitPos)
+      onAnchorPlaced = { anchor, hitPos, source, modelId, modelTitle ->
+        viewModel.addPlacedAnchor(
+          anchorId = "anchor_${anchor.hashCode()}",
+          worldPos = hitPos,
+          source = source,
+          modelId = modelId,
+          modelTitle = modelTitle
+        )
+      }
+      onExhibitMarkerRecognized = { marker, pos ->
+        hapticManager.performDouble()
       }
       onSurfaceViewCreated(this)
     }
@@ -188,7 +211,11 @@ fun MixedRealityScreen(
     val buf = activeGlbBuffer
     val model = selectedModel
     if (buf != null && model != null) {
+      spatialSurfaceView.currentSelectedModelId = model.id
+      spatialSurfaceView.currentSelectedModelTitle = model.title
       spatialSurfaceView.loadGlbBuffer(buf, model.title)
+    } else {
+      spatialSurfaceView.clearModelAndScene()
     }
   }
 
@@ -256,7 +283,68 @@ fun MixedRealityScreen(
       }
     }
 
-    // 3. Shutter Snapshot Flash Overlay
+    // 3. Proximity & Walking Exhibit Overlay (in AR / MR Modes)
+    if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
+      Box(
+        modifier = Modifier
+          .fillMaxWidth()
+          .statusBarsPadding()
+          .padding(top = if (showDiagnostics || displayMode == DisplayMode.AR) 180.dp else 70.dp, start = 16.dp, end = 16.dp)
+          .align(Alignment.TopCenter)
+      ) {
+        NearbyExhibitOverlay(
+          nearbyExhibit = nearbyExhibit,
+          activeAnchorsCount = arAnchors.size,
+          walkingMeters = telemetry.walkingDisplacementMeters
+        )
+      }
+    }
+
+    // 4. Empty State Hint (When Scene is Cleared)
+    if (selectedModel == null && arAnchors.isEmpty()) {
+      Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+          .align(Alignment.Center)
+          .padding(horizontal = 32.dp)
+          .testTag("empty_scene_card")
+      ) {
+        androidx.compose.material3.Surface(
+          shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+          color = Color(0xFF0F172A).copy(alpha = 0.88f),
+          border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
+          modifier = Modifier.padding(16.dp)
+        ) {
+          androidx.compose.foundation.layout.Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp)
+          ) {
+            Icon(
+              imageVector = Icons.Default.ViewInAr,
+              contentDescription = null,
+              tint = Color(0xFF38BDF8),
+              modifier = Modifier.size(36.dp)
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            androidx.compose.material3.Text(
+              text = "Scene is Empty",
+              color = Color.White,
+              fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+              fontSize = 17.sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            androidx.compose.material3.Text(
+              text = "Tap 'Open' or the 3D Model icon above to load an exhibit.",
+              color = Color(0xFF94A3B8),
+              fontSize = 13.sp,
+              textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+          }
+        }
+      }
+    }
+
+    // 5. Shutter Snapshot Flash Overlay
     if (flashAnim.value > 0.01f) {
       Box(
         modifier = Modifier
@@ -265,7 +353,7 @@ fun MixedRealityScreen(
       )
     }
 
-    // 4. TOP CONTROLS: Mode Switcher Pill with Quick Access buttons
+    // 5. TOP CONTROLS: Mode Switcher Pill with Quick Access buttons
     Row(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.SpaceBetween,
@@ -301,26 +389,84 @@ fun MixedRealityScreen(
         }
       )
 
-      // Model Selector Button
-      IconButton(
-        onClick = {
-          hapticManager.performClick()
-          viewModel.setShowModelSelector(true)
-        },
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Image Marker Guide Target Button
+        IconButton(
+          onClick = {
+            hapticManager.performClick()
+            viewModel.setShowMarkerGuide(true)
+          },
+          modifier = Modifier
+            .clip(CircleShape)
+            .background(Color(0xFF0F172A).copy(alpha = 0.85f))
+            .testTag("marker_guide_button")
+        ) {
+          Icon(
+            imageVector = Icons.Default.QrCodeScanner,
+            contentDescription = "Exhibit Markers",
+            tint = Color(0xFFFBBF24)
+          )
+        }
+
+        // Model Selector Button
+        IconButton(
+          onClick = {
+            hapticManager.performClick()
+            viewModel.setShowModelSelector(true)
+          },
+          modifier = Modifier
+            .clip(CircleShape)
+            .background(Color(0xFF0F172A).copy(alpha = 0.85f))
+            .testTag("models_button")
+        ) {
+          Icon(
+            imageVector = Icons.Default.ViewInAr,
+            contentDescription = "Models",
+            tint = Color(0xFF38BDF8)
+          )
+        }
+      }
+    }
+
+    // 6. Object Mode Floating Zoom & Inspect Controls (+ / - / Reset / Auto-Rotate / Grid)
+    if (displayMode == DisplayMode.OBJECT && selectedModel != null) {
+      val cameraDist = spatialSurfaceView.filamentEngine.orbitDistance
+      val zoomPercent = ((2.5f / cameraDist) * 100).toInt().coerceIn(25, 400)
+
+      Box(
         modifier = Modifier
-          .clip(CircleShape)
-          .background(Color(0xFF0F172A).copy(alpha = 0.85f))
-          .testTag("models_button")
+          .align(Alignment.CenterEnd)
+          .padding(end = 16.dp)
       ) {
-        Icon(
-          imageVector = Icons.Default.ViewInAr,
-          contentDescription = "Models",
-          tint = Color(0xFF38BDF8)
+        ObjectZoomInspectWidget(
+          zoomPercentage = zoomPercent,
+          isAutoRotating = autoRotate,
+          isGridVisible = showGridFloor,
+          onZoomIn = {
+            hapticManager.performClick()
+            spatialSurfaceView.filamentEngine.zoomIn()
+          },
+          onZoomOut = {
+            hapticManager.performClick()
+            spatialSurfaceView.filamentEngine.zoomOut()
+          },
+          onResetView = {
+            hapticManager.performClick()
+            spatialSurfaceView.filamentEngine.resetTransforms()
+          },
+          onToggleAutoRotate = {
+            hapticManager.performClick()
+            viewModel.setAutoRotate(!autoRotate)
+          },
+          onToggleGrid = {
+            hapticManager.performClick()
+            viewModel.setShowGridFloor(!showGridFloor)
+          }
         )
       }
     }
 
-    // 5. Animation Controls (Floating above bottom pill)
+    // 7. Animation Controls (Floating above bottom pill in Object mode)
     if (displayMode == DisplayMode.OBJECT && (selectedModel?.hasAnimations == true)) {
       Box(
         contentAlignment = Alignment.BottomCenter,
@@ -352,7 +498,7 @@ fun MixedRealityScreen(
       }
     }
 
-    // 6. BOTTOM CONTROLS: Floating Action Pill [ PHOTO | (● REC) | Open | Clear ]
+    // 8. BOTTOM CONTROLS: Floating Action Pill [ PHOTO | (● REC) | Open | Clear ]
     Box(
       contentAlignment = Alignment.BottomCenter,
       modifier = Modifier
@@ -370,7 +516,6 @@ fun MixedRealityScreen(
             flashAnim.snapTo(0.85f)
             flashAnim.animateTo(0f, tween(350))
           }
-          // Perform genuine hardware PixelCopy snapshot
           spatialSurfaceView.captureSnapshot(
             onCaptured = { bmp ->
               viewModel.saveSnapshot(bmp, context)
@@ -390,13 +535,13 @@ fun MixedRealityScreen(
         },
         onClearClick = {
           hapticManager.performHeavy()
-          spatialSurfaceView.resetView()
-          viewModel.resetOrRestoreModel()
+          spatialSurfaceView.clearModelAndScene()
+          viewModel.clearActiveModelAndScene()
         }
       )
     }
 
-    // 7. Sheets for Model Selector & Settings
+    // 8. Sheets for Model Selector, Marker Guide & Settings
     if (showModelSelector) {
       ModelSelectorSheet(
         sheetState = modelSheetState,
@@ -412,6 +557,21 @@ fun MixedRealityScreen(
           filePickerLauncher.launch("*/*")
         },
         onDismiss = { viewModel.setShowModelSelector(false) }
+      )
+    }
+
+    if (showMarkerGuide) {
+      ExhibitMarkerGuideSheet(
+        sheetState = markerSheetState,
+        onSelectModel = { modelId ->
+          hapticManager.performClick()
+          val model = modelsList.firstOrNull { it.id == modelId }
+          if (model != null) {
+            viewModel.selectModel(model)
+          }
+          viewModel.setShowMarkerGuide(false)
+        },
+        onDismiss = { viewModel.setShowMarkerGuide(false) }
       )
     }
 
