@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Log
 import java.io.File
 import java.io.FileWriter
-import java.io.PrintWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -19,6 +18,12 @@ class DiagnosticsLogger(private val context: Context) {
     private const val TAG = "DiagnosticsLogger"
     private const val LOG_FILE_NAME = "spatial_diagnostics.log"
     private const val RETENTION_DAYS_MS = 7L * 24 * 60 * 60 * 1000L
+    private var instance: DiagnosticsLogger? = null
+
+    fun log(tag: String, message: String, level: String = "INFO") {
+      Log.i(tag, "[$level] $message")
+      instance?.log(tag, message, level)
+    }
   }
 
   private val logFile: File by lazy {
@@ -28,6 +33,7 @@ class DiagnosticsLogger(private val context: Context) {
   private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
 
   init {
+    instance = this
     purgeOldLogs()
   }
 
@@ -58,16 +64,6 @@ class DiagnosticsLogger(private val context: Context) {
   }
 
   @Synchronized
-  fun getExportLogContent(): String {
-    return try {
-      if (!logFile.exists()) return "No diagnostic logs recorded yet."
-      logFile.readText()
-    } catch (e: Exception) {
-      "Error reading logs: ${e.message}"
-    }
-  }
-
-  @Synchronized
   fun clearLogs() {
     try {
       if (logFile.exists()) {
@@ -78,20 +74,18 @@ class DiagnosticsLogger(private val context: Context) {
     }
   }
 
-  /**
-   * Purges diagnostic log lines or backup files older than 7 days.
-   */
   private fun purgeOldLogs() {
     try {
       if (logFile.exists()) {
-        val fileAgeMs = System.currentTimeMillis() - logFile.lastModified()
-        if (fileAgeMs > RETENTION_DAYS_MS) {
+        val lastModified = logFile.lastModified()
+        val now = System.currentTimeMillis()
+        if (now - lastModified > RETENTION_DAYS_MS) {
           logFile.delete()
-          Log.i(TAG, "Purged diagnostic log file older than 7 days.")
+          Log.i(TAG, "Purged diagnostic logs older than 7 days.")
         }
       }
     } catch (e: Exception) {
-      Log.w(TAG, "Error checking log retention: ${e.message}")
+      Log.w(TAG, "Error purging old logs: ${e.message}")
     }
   }
 }

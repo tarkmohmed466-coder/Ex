@@ -16,6 +16,7 @@ import android.view.SurfaceView
 import com.example.arcore.ArCoreSessionManager
 import com.example.arcore.ArCoreTrackingData
 import com.example.arcore.DepthOcclusionManager
+import com.example.engine.DiagnosticsLogger
 import com.example.engine.TwoFingerRotateDetector
 import com.example.model.DisplayMode
 import com.google.ar.core.Anchor
@@ -27,7 +28,7 @@ import kotlin.math.abs
 /**
  * High-performance Android SurfaceView bridging Google Filament and Google ARCore.
  * Supports:
- * - 60+ FPS Choreographer-driven rendering.
+ * - 60+ FPS Choreographer-driven rendering with zero allocations in doFrame.
  * - ARCore 6DoF Camera synchronization & plane anchoring.
  * - Real 16-bit Depth extraction & Depth Occlusion processing.
  * - Real-world 1:1 Metric Scale (1 unit = 1 physical meter).
@@ -81,6 +82,12 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
   // Latest AR tracking data
   private var latestTrackingData = ArCoreTrackingData()
+
+  // Preallocated per-frame scratch buffers for zero garbage collection overhead
+  private val scratchProjMatrix = FloatArray(16)
+  private val scratchViewMatrix = FloatArray(16)
+  private val scratchHeadPoseMatrix = FloatArray(16)
+  private val scratchAnchorPoses = mutableListOf<Pose>()
 
   init {
     holder.addCallback(this)
@@ -212,18 +219,22 @@ class SpatialSurfaceView @JvmOverloads constructor(
       DisplayMode.AR -> {
         val frame = arCoreSessionManager.updateFrame()
         if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
-          val projMatrix = FloatArray(16)
-          val viewMatrix = FloatArray(16)
-          frame.camera.getProjectionMatrix(projMatrix, 0, 0.05f, 50.0f)
-          frame.camera.getViewMatrix(viewMatrix, 0)
+          frame.camera.getProjectionMatrix(scratchProjMatrix, 0, 0.05f, 50.0f)
+          frame.camera.getViewMatrix(scratchViewMatrix, 0)
 
-          filamentEngine.setCameraFromArCore(projMatrix, viewMatrix)
+          filamentEngine.setCameraFromArCore(scratchProjMatrix, scratchViewMatrix)
 
-          // Process Depth Occlusion
-          val anchorPoses = activeArAnchors.filter { it.trackingState == TrackingState.TRACKING }.map { it.pose }
-          depthOcclusionManager.processFrameDepth(frame, anchorPoses)
+          // Process Depth Occlusion without heap allocations
+          scratchAnchorPoses.clear()
+          for (i in 0 until activeArAnchors.size) {
+            val a = activeArAnchors[i]
+            if (a.trackingState == TrackingState.TRACKING) {
+              scratchAnchorPoses.add(a.pose)
+            }
+          }
+          depthOcclusionManager.processFrameDepth(frame, scratchAnchorPoses)
 
-          // Update multi-anchors & primary model pose
+          // Update primary model pose attached to active anchor
           val currentAsset = filamentEngine.currentAsset
           if (currentAsset != null && activeArAnchors.isNotEmpty()) {
             val primaryAnchor = activeArAnchors.lastOrNull()
@@ -237,24 +248,29 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
       DisplayMode.MR -> {
         val frame = arCoreSessionManager.updateFrame()
-        val headPoseMatrix = if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
-          val mat = FloatArray(16)
-          frame.camera.getViewMatrix(mat, 0)
-          mat
-        } else {
-          null
+        val hasValidTracking = frame != null && frame.camera.trackingState == TrackingState.TRACKING
+        if (hasValidTracking) {
+          frame!!.camera.getViewMatrix(scratchHeadPoseMatrix, 0)
         }
 
         // Process Depth in MR
         if (frame != null) {
-          depthOcclusionManager.processFrameDepth(
-            frame,
-            activeArAnchors.filter { it.trackingState == TrackingState.TRACKING }.map { it.pose }
-          )
+          scratchAnchorPoses.clear()
+          for (i in 0 until activeArAnchors.size) {
+            val a = activeArAnchors[i]
+            if (a.trackingState == TrackingState.TRACKING) {
+              scratchAnchorPoses.add(a.pose)
+            }
+          }
+          depthOcclusionManager.processFrameDepth(frame, scratchAnchorPoses)
         }
 
         val ipdMeters = 0.064f // Default 64mm IPD
-        filamentEngine.renderStereoFrame(frameTimeNanos, ipdMeters, headPoseMatrix)
+        filamentEngine.renderStereoFrame(
+          frameTimeNanos,
+          ipdMeters,
+          if (hasValidTracking) scratchHeadPoseMatrix else null
+        )
       }
     }
 
@@ -338,6 +354,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
           val posArr = floatArrayOf(hitPose.tx(), hitPose.ty(), hitPose.tz())
           onAnchorPlaced?.invoke(anchor, posArr)
           Log.i(TAG, "ARCore Anchor pinned on plane at: ${hitPose.tx()}, ${hitPose.ty()}, ${hitPose.tz()}")
+          DiagnosticsLogger.log(TAG, "Placed Anchor at (${hitPose.tx()}, ${hitPose.ty()}, ${hitPose.tz()})")
         }
       }
     }

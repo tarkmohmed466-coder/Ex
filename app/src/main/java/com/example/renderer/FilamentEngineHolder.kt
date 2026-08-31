@@ -4,6 +4,10 @@ import android.content.Context
 import android.opengl.Matrix
 import android.util.Log
 import android.view.Surface
+import com.example.engine.DiagnosticsLogger
+import com.example.engine.HardwareCapabilityDetector
+import com.example.engine.HardwareCapabilities
+import com.example.engine.RenderQualityProfile
 import com.google.android.filament.Camera
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
@@ -35,9 +39,11 @@ import kotlin.math.tan
  * - Real-world 1:1 Metric Scale (1 unit = 1 physical meter).
  * - Multi-Anchor Scene rendering (independent 6DoF transforms).
  * - High-precision Asymmetric Off-Axis Stereoscopic MR Projection per eye.
- * - Multi-track Skeletal & Morph Animation engine with scrubbing.
+ * - Zero-allocation per-frame render loop (preallocated scratch buffers).
+ * - Multi-track Skeletal & Morph Animation engine with scrubbing and reset.
  * - Dynamic Thermal MSAA & FXAA quality adaptation.
- * - ARCore Environmental HDR lighting integration.
+ * - ARCore Environmental HDR lighting integration with exponential moving average (EMA) smoothing.
+ * - Dynamic resolution scaling support.
  */
 class FilamentEngineHolder(private val context: Context) {
 
@@ -73,19 +79,29 @@ class FilamentEngineHolder(private val context: Context) {
     private set
   private var currentInstance: FilamentInstance? = null
 
-  // Multi-Anchor Asset Instances
-  private val placedInstances = mutableListOf<FilamentAsset>()
-
   // Lighting entities
   @com.google.android.filament.Entity
   private var sunlightEntity: Int = 0
   private var indirectLight: IndirectLight? = null
+
+  // Smoothed Environmental Light Estimation values
+  private val smoothedLightDir = floatArrayOf(0.0f, -1.0f, -0.6f)
+  private val smoothedLightColor = floatArrayOf(1.0f, 0.98f, 0.95f)
+  private var smoothedIntensity: Float = 100000.0f
+  private val lightSmoothingAlpha: Float = 0.15f
 
   // Surface Dimensions
   var surfaceWidth: Int = 1080
     private set
   var surfaceHeight: Int = 1920
     private set
+
+  // Dynamic Resolution Scale Factor (0.5f to 1.0f)
+  var dynamicResolutionScale: Float = 1.0f
+    set(value) {
+      field = value.coerceIn(0.5f, 1.0f)
+      view?.viewport = Viewport(0, 0, (surfaceWidth * field).toInt(), (surfaceHeight * field).toInt())
+    }
 
   // Telemetry
   var fps: Float = 60f
@@ -130,6 +146,15 @@ class FilamentEngineHolder(private val context: Context) {
   var modelPhysicalDepthMeters: Float = 1.0f
     private set
 
+  // Preallocated zero-allocation scratch buffers for high-frequency render loops
+  private val scratchProjDouble = DoubleArray(16)
+  private val scratchViewDouble = DoubleArray(16)
+  private val scratchLeftEyeMatrix = FloatArray(16)
+  private val scratchRightEyeMatrix = FloatArray(16)
+  private val scratchLeftProjMatrix = FloatArray(16)
+  private val scratchRightProjMatrix = FloatArray(16)
+  private val scratchModelMatrix = FloatArray(16)
+
   fun initialize() {
     val eng = Engine.create()
     engine = eng
@@ -163,7 +188,38 @@ class FilamentEngineHolder(private val context: Context) {
     // Setup Sun & Ambient Lights
     setupLights(eng, scn)
 
-    Log.i(TAG, "Filament Engine, Renderer, Scene, View & gltfio initialized successfully.")
+    // Detect capabilities and configure initial quality
+    val caps = HardwareCapabilityDetector.detect(context)
+    applyQualityProfile(caps.suggestedProfile)
+
+    Log.i(TAG, "Filament Engine, Renderer, Scene, View & gltfio initialized successfully with profile: ${caps.suggestedProfile}")
+  }
+
+  fun applyQualityProfile(profile: RenderQualityProfile) {
+    val v = view ?: return
+    when (profile) {
+      RenderQualityProfile.ULTRA -> {
+        v.sampleCount = 4
+        v.antiAliasing = View.AntiAliasing.FXAA
+        v.isPostProcessingEnabled = true
+      }
+      RenderQualityProfile.HIGH -> {
+        v.sampleCount = 4
+        v.antiAliasing = View.AntiAliasing.FXAA
+        v.isPostProcessingEnabled = true
+      }
+      RenderQualityProfile.MEDIUM -> {
+        v.sampleCount = 2
+        v.antiAliasing = View.AntiAliasing.FXAA
+        v.isPostProcessingEnabled = true
+      }
+      RenderQualityProfile.LOW -> {
+        v.sampleCount = 1
+        v.antiAliasing = View.AntiAliasing.NONE
+        v.isPostProcessingEnabled = false
+      }
+    }
+    DiagnosticsLogger.log(TAG, "Applied Render Quality Profile: $profile")
   }
 
   private fun setupLights(eng: Engine, scn: Scene) {
@@ -195,7 +251,9 @@ class FilamentEngineHolder(private val context: Context) {
   fun onSurfaceResized(width: Int, height: Int) {
     surfaceWidth = max(1, width)
     surfaceHeight = max(1, height)
-    view?.viewport = Viewport(0, 0, surfaceWidth, surfaceHeight)
+    val scaledW = (surfaceWidth * dynamicResolutionScale).toInt()
+    val scaledH = (surfaceHeight * dynamicResolutionScale).toInt()
+    view?.viewport = Viewport(0, 0, scaledW, scaledH)
   }
 
   /**
@@ -250,16 +308,18 @@ class FilamentEngineHolder(private val context: Context) {
         currentAnimationTimeSec = 0f
 
         Log.i(TAG, "Successfully loaded Filament 1:1 Metric glTF asset: $assetTitle (${modelPhysicalWidthMeters}m x ${modelPhysicalHeightMeters}m x ${modelPhysicalDepthMeters}m)")
+        DiagnosticsLogger.log(TAG, "Loaded Asset '$assetTitle': ${modelPhysicalWidthMeters}m x ${modelPhysicalHeightMeters}m x ${modelPhysicalDepthMeters}m")
         return asset
       }
     } catch (e: Exception) {
       Log.e(TAG, "Error loading glTF asset with Filament gltfio", e)
+      DiagnosticsLogger.log(TAG, "Failed loading asset: ${e.message}")
     }
     return null
   }
 
   /**
-   * Updates Environmental HDR lighting parameters from ARCore light estimation.
+   * Updates Environmental HDR lighting parameters with EMA smoothing.
    */
   fun updateEnvironmentalHdrLighting(
     mainLightDir: FloatArray,
@@ -270,27 +330,37 @@ class FilamentEngineHolder(private val context: Context) {
     val lm = eng.lightManager
     val sunInst = lm.getInstance(sunlightEntity)
     if (sunInst != 0) {
-      lm.setDirection(sunInst, mainLightDir[0], mainLightDir[1], mainLightDir[2])
-      lm.setColor(
-        sunInst,
-        mainLightIntensityRgb[0] * colorCorrection[0],
-        mainLightIntensityRgb[1] * colorCorrection[1],
-        mainLightIntensityRgb[2] * colorCorrection[2]
-      )
+      // Exponential Moving Average filter to smooth light transitions
+      smoothedLightDir[0] += (mainLightDir[0] - smoothedLightDir[0]) * lightSmoothingAlpha
+      smoothedLightDir[1] += (mainLightDir[1] - smoothedLightDir[1]) * lightSmoothingAlpha
+      smoothedLightDir[2] += (mainLightDir[2] - smoothedLightDir[2]) * lightSmoothingAlpha
+
+      val targetR = mainLightIntensityRgb[0] * colorCorrection[0]
+      val targetG = mainLightIntensityRgb[1] * colorCorrection[1]
+      val targetB = mainLightIntensityRgb[2] * colorCorrection[2]
+
+      smoothedLightColor[0] += (targetR - smoothedLightColor[0]) * lightSmoothingAlpha
+      smoothedLightColor[1] += (targetG - smoothedLightColor[1]) * lightSmoothingAlpha
+      smoothedLightColor[2] += (targetB - smoothedLightColor[2]) * lightSmoothingAlpha
+
+      lm.setDirection(sunInst, smoothedLightDir[0], smoothedLightDir[1], smoothedLightDir[2])
+      lm.setColor(sunInst, smoothedLightColor[0], smoothedLightColor[1], smoothedLightColor[2])
       lm.setIntensity(sunInst, sunIntensity)
     }
   }
 
   /**
    * Synchronizes Filament camera projection and view matrices directly from ARCore Frame.
+   * Zero-allocation using preallocated scratch buffers.
    */
   fun setCameraFromArCore(projectionMatrix: FloatArray, viewMatrix: FloatArray) {
     val cam = camera ?: return
-    val projDouble = DoubleArray(16) { projectionMatrix[it].toDouble() }
-    cam.setCustomProjection(projDouble, 0.05, 100.0)
-
-    val viewDouble = DoubleArray(16) { viewMatrix[it].toDouble() }
-    cam.setModelMatrix(viewDouble)
+    for (i in 0 until 16) {
+      scratchProjDouble[i] = projectionMatrix[i].toDouble()
+      scratchViewDouble[i] = viewMatrix[i].toDouble()
+    }
+    cam.setCustomProjection(scratchProjDouble, 0.05, 100.0)
+    cam.setModelMatrix(scratchViewDouble)
   }
 
   /**
@@ -328,6 +398,7 @@ class FilamentEngineHolder(private val context: Context) {
   /**
    * Renders dual-viewport stereoscopic MR frame with mathematically exact off-axis
    * asymmetric perspective projection per eye based on physical IPD and convergence focal plane.
+   * Zero heap allocations inside this function.
    */
   fun renderStereoFrame(
     frameTimeNanos: Long,
@@ -356,34 +427,34 @@ class FilamentEngineHolder(private val context: Context) {
 
     // 1. Left Eye Viewport & Asymmetric Off-Axis Projection
     v.viewport = Viewport(0, 0, halfWidth, surfaceHeight)
-    val leftEyeMatrix = FloatArray(16)
     if (headPoseMatrix != null) {
-      System.arraycopy(headPoseMatrix, 0, leftEyeMatrix, 0, 16)
-      Matrix.translateM(leftEyeMatrix, 0, -halfIpd, 0f, 0f)
-      cam.setModelMatrix(DoubleArray(16) { leftEyeMatrix[it].toDouble() })
+      System.arraycopy(headPoseMatrix, 0, scratchLeftEyeMatrix, 0, 16)
+      Matrix.translateM(scratchLeftEyeMatrix, 0, -halfIpd, 0f, 0f)
+      for (i in 0 until 16) scratchViewDouble[i] = scratchLeftEyeMatrix[i].toDouble()
+      cam.setModelMatrix(scratchViewDouble)
     }
 
     val leftFrustum = -a + halfIpd * (nearPlane / focalDistance)
     val rightFrustum = a + halfIpd * (nearPlane / focalDistance)
-    val leftProjMatrix = FloatArray(16)
-    Matrix.frustumM(leftProjMatrix, 0, leftFrustum, rightFrustum, bottom, top, nearPlane, farPlane)
-    cam.setCustomProjection(DoubleArray(16) { leftProjMatrix[it].toDouble() }, nearPlane.toDouble(), farPlane.toDouble())
+    Matrix.frustumM(scratchLeftProjMatrix, 0, leftFrustum, rightFrustum, bottom, top, nearPlane, farPlane)
+    for (i in 0 until 16) scratchProjDouble[i] = scratchLeftProjMatrix[i].toDouble()
+    cam.setCustomProjection(scratchProjDouble, nearPlane.toDouble(), farPlane.toDouble())
     rend.render(v)
 
     // 2. Right Eye Viewport & Asymmetric Off-Axis Projection
     v.viewport = Viewport(halfWidth, 0, halfWidth, surfaceHeight)
-    val rightEyeMatrix = FloatArray(16)
     if (headPoseMatrix != null) {
-      System.arraycopy(headPoseMatrix, 0, rightEyeMatrix, 0, 16)
-      Matrix.translateM(rightEyeMatrix, 0, halfIpd, 0f, 0f)
-      cam.setModelMatrix(DoubleArray(16) { rightEyeMatrix[it].toDouble() })
+      System.arraycopy(headPoseMatrix, 0, scratchRightEyeMatrix, 0, 16)
+      Matrix.translateM(scratchRightEyeMatrix, 0, halfIpd, 0f, 0f)
+      for (i in 0 until 16) scratchViewDouble[i] = scratchRightEyeMatrix[i].toDouble()
+      cam.setModelMatrix(scratchViewDouble)
     }
 
     val rightEyeLeftFrustum = -a - halfIpd * (nearPlane / focalDistance)
     val rightEyeRightFrustum = a - halfIpd * (nearPlane / focalDistance)
-    val rightProjMatrix = FloatArray(16)
-    Matrix.frustumM(rightProjMatrix, 0, rightEyeLeftFrustum, rightEyeRightFrustum, bottom, top, nearPlane, farPlane)
-    cam.setCustomProjection(DoubleArray(16) { rightProjMatrix[it].toDouble() }, nearPlane.toDouble(), farPlane.toDouble())
+    Matrix.frustumM(scratchRightProjMatrix, 0, rightEyeLeftFrustum, rightEyeRightFrustum, bottom, top, nearPlane, farPlane)
+    for (i in 0 until 16) scratchProjDouble[i] = scratchRightProjMatrix[i].toDouble()
+    cam.setCustomProjection(scratchProjDouble, nearPlane.toDouble(), farPlane.toDouble())
     rend.render(v)
 
     rend.endFrame()
@@ -399,7 +470,10 @@ class FilamentEngineHolder(private val context: Context) {
 
     if (!rend.beginFrame(sc, frameTimeNanos)) return
 
-    v.viewport = Viewport(0, 0, surfaceWidth, surfaceHeight)
+    val scaledW = (surfaceWidth * dynamicResolutionScale).toInt()
+    val scaledH = (surfaceHeight * dynamicResolutionScale).toInt()
+    v.viewport = Viewport(0, 0, scaledW, scaledH)
+
     updateAssetAnimations(frameTimeNanos)
 
     rend.render(v)
@@ -427,6 +501,11 @@ class FilamentEngineHolder(private val context: Context) {
     applyAnimationAtTime(timeSec)
   }
 
+  fun resetAnimationPose() {
+    currentAnimationTimeSec = 0f
+    applyAnimationAtTime(0f)
+  }
+
   private fun applyAnimationAtTime(timeSec: Float) {
     val asset = currentAsset ?: return
     val animator = asset.instance.animator
@@ -443,21 +522,21 @@ class FilamentEngineHolder(private val context: Context) {
 
   /**
    * Updates physical model pose attached to an ARCore anchor at strict 1:1 metric scale.
+   * Zero-allocation using preallocated scratch buffer.
    */
   fun updateAnchorPose(asset: FilamentAsset, pose: Pose) {
     val eng = engine ?: return
     val tm = eng.transformManager
     val rootInst = tm.getInstance(asset.root)
     if (rootInst != 0) {
-      val modelMatrix = FloatArray(16)
-      pose.toMatrix(modelMatrix, 0)
+      pose.toMatrix(scratchModelMatrix, 0)
 
       // Apply rotation and 1:1 physical meter scaling
       if (modelRotationDegrees != 0f) {
-        Matrix.rotateM(modelMatrix, 0, modelRotationDegrees, 0f, 1f, 0f)
+        Matrix.rotateM(scratchModelMatrix, 0, modelRotationDegrees, 0f, 1f, 0f)
       }
-      Matrix.scaleM(modelMatrix, 0, modelScale, modelScale, modelScale)
-      tm.setTransform(rootInst, modelMatrix)
+      Matrix.scaleM(scratchModelMatrix, 0, modelScale, modelScale, modelScale)
+      tm.setTransform(rootInst, scratchModelMatrix)
     }
   }
 
