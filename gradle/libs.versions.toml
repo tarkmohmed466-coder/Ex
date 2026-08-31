@@ -41,9 +41,15 @@ secretsGradlePlugin = "2.0.1"
 googleServices = "4.5.0"
 credentials = "1.5.0"
 googleid = "1.1.1"
+filament = "1.56.0"
+arcore = "1.47.0"
 
 
 [libraries]
+filament-android = { group = "com.google.android.filament", name = "filament-android", version.ref = "filament" }
+gltfio-android = { group = "com.google.android.filament", name = "gltfio-android", version.ref = "filament" }
+filament-utils-android = { group = "com.google.android.filament", name = "filament-utils-android", version.ref = "filament" }
+arcore = { group = "com.google.ar", name = "core", version.ref = "arcore" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }

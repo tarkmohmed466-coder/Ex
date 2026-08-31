@@ -100,6 +100,10 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
+  implementation(libs.filament.android)
+  implementation(libs.gltfio.android)
+  implementation(libs.filament.utils.android)
+  implementation(libs.arcore)
   implementation(libs.firebase.ai)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)

@@ -34,7 +34,7 @@ fun DiagnosticsHud(
   Box(
     modifier = modifier
       .clip(RoundedCornerShape(16.dp))
-      .background(Color(0xFF0F172A).copy(alpha = 0.85f))
+      .background(Color(0xFF0F172A).copy(alpha = 0.90f))
       .padding(horizontal = 14.dp, vertical = 10.dp)
       .testTag("diagnostics_hud")
   ) {
@@ -82,16 +82,35 @@ fun DiagnosticsHud(
         modifier = Modifier.fillMaxWidth()
       ) {
         Text(
-          text = "GPU: ES 3.0 Accelerated",
+          text = "ENGINE: Filament gltfio",
           fontFamily = FontFamily.Monospace,
           fontSize = 11.sp,
-          color = Color(0xFF64748B)
+          color = Color(0xFF38BDF8)
         )
         Text(
           text = "AR: ${telemetry.arTrackingStatus}",
           fontFamily = FontFamily.Monospace,
           fontSize = 11.sp,
-          color = Color(0xFF22C55E)
+          color = if (telemetry.arTrackingStatus.contains("TRACKING")) Color(0xFF22C55E) else Color(0xFFEAB308)
+        )
+      }
+
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth()
+      ) {
+        Text(
+          text = "Planes: H:${telemetry.horizontalPlanesCount} V:${telemetry.verticalPlanesCount} | Anchors: ${telemetry.activeAnchorsCount}",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = Color(0xFF94A3B8)
+        )
+        Text(
+          text = "Light: ${telemetry.lightIntensityLumens.toInt()} lx",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = Color(0xFFFBBF24)
         )
       }
     }

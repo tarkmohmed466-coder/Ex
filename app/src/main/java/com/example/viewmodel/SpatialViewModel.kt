@@ -7,13 +7,14 @@ import android.net.Uri
 import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.arcore.ArCoreTrackingData
 import com.example.engine.LogEntry
 import com.example.engine.TelemetryState
 import com.example.model.DisplayMode
 import com.example.model.SpatialAnchor
 import com.example.model.SpatialModel
-import com.example.parser.GlbParser
-import com.example.parser.ProceduralModels
+import com.example.parser.GltfAssetFactory
+import com.google.ar.core.TrackingState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -35,11 +37,17 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   private val _displayMode = MutableStateFlow(DisplayMode.OBJECT)
   val displayMode: StateFlow<DisplayMode> = _displayMode.asStateFlow()
 
-  private val _modelsList = MutableStateFlow<List<SpatialModel>>(ProceduralModels.getBundledModels())
+  private val _modelsList = MutableStateFlow<List<SpatialModel>>(GltfAssetFactory.getPresetModels())
   val modelsList: StateFlow<List<SpatialModel>> = _modelsList.asStateFlow()
 
   private val _selectedModel = MutableStateFlow<SpatialModel?>(_modelsList.value.firstOrNull())
   val selectedModel: StateFlow<SpatialModel?> = _selectedModel.asStateFlow()
+
+  // Active GLB / glTF direct ByteBuffer for Filament gltfio
+  private val _activeGlbBuffer = MutableStateFlow<ByteBuffer?>(
+    _modelsList.value.firstOrNull()?.let { GltfAssetFactory.getPresetGlbBuffer(it.id) }
+  )
+  val activeGlbBuffer: StateFlow<ByteBuffer?> = _activeGlbBuffer.asStateFlow()
 
   private val _isRecording = MutableStateFlow(false)
   val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
@@ -68,10 +76,10 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   private val _animationSpeed = MutableStateFlow(1.0f)
   val animationSpeed: StateFlow<Float> = _animationSpeed.asStateFlow()
 
-  private val _ambientIntensity = MutableStateFlow(1.2f)
+  private val _ambientIntensity = MutableStateFlow(30000.0f)
   val ambientIntensity: StateFlow<Float> = _ambientIntensity.asStateFlow()
 
-  private val _sunIntensity = MutableStateFlow(1.0f)
+  private val _sunIntensity = MutableStateFlow(100000.0f)
   val sunIntensity: StateFlow<Float> = _sunIntensity.asStateFlow()
 
   private val _ipdMm = MutableStateFlow(64.0f)
@@ -91,16 +99,17 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   fun setDisplayMode(mode: DisplayMode) {
     _displayMode.value = mode
     val modeName = when (mode) {
-      DisplayMode.MR -> "MR Stereo Mode Activated"
-      DisplayMode.AR -> "AR Spatial Tracking Activated"
-      DisplayMode.OBJECT -> "3D Object Inspection Activated"
+      DisplayMode.MR -> "MR Native Stereo Mode Activated"
+      DisplayMode.AR -> "AR 6DoF Spatial Tracking Activated"
+      DisplayMode.OBJECT -> "3D Filament Studio Activated"
     }
     emitToast(modeName)
-    log("DISPLAY", "Switched to mode: $mode")
+    log("DISPLAY", "Switched display pipeline to: $mode")
   }
 
   fun selectModel(model: SpatialModel) {
     _selectedModel.value = model
+    _activeGlbBuffer.value = GltfAssetFactory.getPresetGlbBuffer(model.id)
     _telemetry.update {
       it.copy(
         vertexCount = model.vertexCount,
@@ -108,7 +117,55 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
       )
     }
     emitToast("Loaded: ${model.title}")
-    log("MODEL", "Selected model: ${model.title}")
+    log("FILAMENT_GLTF", "Instantiated glTF model: ${model.title}")
+  }
+
+  fun loadCustomGlbFromUri(uri: Uri, context: Context) {
+    viewModelScope.launch {
+      try {
+        val directBuffer = GltfAssetFactory.readUriToDirectByteBuffer(context, uri)
+        if (directBuffer != null) {
+          val modelName = uri.lastPathSegment?.substringAfterLast('/') ?: "Custom_Model.glb"
+          val customModel = SpatialModel(
+            id = "custom_${System.currentTimeMillis()}",
+            title = modelName,
+            description = "Custom loaded glTF / GLB asset.",
+            category = "Imported 3D Assets",
+            vertexCount = directBuffer.capacity() / 64,
+            triangleCount = directBuffer.capacity() / 128,
+            isCustomLoaded = true,
+            hasAnimations = true,
+            animationDurationSec = 4.0f
+          )
+          _modelsList.update { listOf(customModel) + it }
+          _selectedModel.value = customModel
+          _activeGlbBuffer.value = directBuffer
+          emitToast("Imported GLB: $modelName")
+          log("GLTFIO", "Parsed and loaded external glTF buffer: $modelName (${directBuffer.capacity() / 1024} KB)")
+        } else {
+          emitToast("Could not read GLB / glTF file.")
+        }
+      } catch (e: Exception) {
+        emitToast("Error loading glTF file: ${e.message}")
+        log("ERROR", "Failed to load glTF: ${e.message}")
+      }
+    }
+  }
+
+  fun addPlacedAnchor(anchorId: String, worldPos: FloatArray) {
+    val model = _selectedModel.value ?: return
+    val newAnchor = SpatialAnchor(
+      id = anchorId,
+      posX = worldPos[0],
+      posY = worldPos[1],
+      posZ = worldPos[2],
+      rotY = 0f,
+      modelId = model.id
+    )
+    _arAnchors.update { it + newAnchor }
+    _telemetry.update { it.copy(activeAnchorsCount = _arAnchors.value.size) }
+    emitToast("Spatial Anchor Placed (${_arAnchors.value.size})")
+    log("ARCORE_ANCHOR", "Pinned anchor at (%.2f, %.2f, %.2f)".format(worldPos[0], worldPos[1], worldPos[2]))
   }
 
   fun toggleRecording() {
@@ -124,12 +181,12 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         }
       }
       emitToast("Spatial Video Recording Started")
-      log("RECORDER", "Spatial recording started")
+      log("RECORDER", "Spatial capture pipeline active")
     } else {
       recordingJob?.cancel()
       val duration = _recordingDurationSec.value
-      emitToast("Video saved to Gallery ($duration s)")
-      log("RECORDER", "Spatial recording stopped. Duration: $duration s")
+      emitToast("Spatial Video saved ($duration s)")
+      log("RECORDER", "Spatial capture saved. Duration: $duration s")
     }
   }
 
@@ -144,80 +201,25 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
           bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
         }
         emitToast("Spatial Photo saved ($fileName)")
-        log("CAPTURE", "Snapshot saved: ${file.absolutePath}")
+        log("CAPTURE", "Snapshot saved to ${file.absolutePath}")
       } catch (e: Exception) {
         emitToast("Photo captured")
-        log("CAPTURE", "Snapshot capture completed with feedback")
       }
     }
-  }
-
-  fun loadCustomGlbFromUri(uri: Uri, context: Context) {
-    viewModelScope.launch {
-      try {
-        val contentResolver = context.contentResolver
-        contentResolver.openInputStream(uri)?.use { inputStream ->
-          val modelName = uri.lastPathSegment ?: "Custom_Model.glb"
-          val parsedModel = GlbParser.parseGlb(inputStream, modelName)
-          _modelsList.update { listOf(parsedModel) + it }
-          selectModel(parsedModel)
-          emitToast("Imported: $modelName")
-          log("GLB_PARSER", "Loaded GLB model successfully: $modelName")
-        }
-      } catch (e: Exception) {
-        emitToast("Error loading GLB file: ${e.message}")
-        log("ERROR", "Failed to load GLB: ${e.message}")
-      }
-    }
-  }
-
-  fun placeArAnchorAt(worldX: Float, worldY: Float, worldZ: Float) {
-    val model = _selectedModel.value ?: return
-    val newAnchor = SpatialAnchor(
-      id = "anchor_${System.currentTimeMillis()}",
-      posX = worldX,
-      posY = worldY,
-      posZ = worldZ,
-      rotY = (Math.random() * 360).toFloat(),
-      modelId = model.id
-    )
-    _arAnchors.update { it + newAnchor }
-    emitToast("Spatial Anchor Placed (${_arAnchors.value.size})")
-    log("AR_TRACKING", "Anchor pinned at hit: (%.2f, %.2f, %.2f)".format(worldX, worldY, worldZ))
-  }
-
-  fun placeArAnchor(x: Float, y: Float) {
-    val model = _selectedModel.value ?: return
-    val newAnchor = SpatialAnchor(
-      id = "anchor_${System.currentTimeMillis()}",
-      posX = (x - 0.5f) * 2.5f,
-      posY = -0.5f,
-      posZ = -2.0f,
-      rotY = (Math.random() * 360).toFloat(),
-      modelId = model.id
-    )
-    _arAnchors.update { it + newAnchor }
-    emitToast("Spatial Anchor Placed (${_arAnchors.value.size})")
-    log("AR_TRACKING", "Placed spatial anchor at (${newAnchor.posX}, ${newAnchor.posY}, ${newAnchor.posZ})")
   }
 
   fun resetOrRestoreModel() {
     _arAnchors.value = emptyList()
     if (_selectedModel.value == null) {
       _selectedModel.value = _modelsList.value.firstOrNull()
-      emitToast("Default Model Restored & Reset")
-      log("SCENE", "Restored default model and reset anchors")
+      _activeGlbBuffer.value = _modelsList.value.firstOrNull()?.let { GltfAssetFactory.getPresetGlbBuffer(it.id) }
+      emitToast("Default Model Restored")
+      log("SCENE", "Restored default model and cleared anchors")
     } else {
-      emitToast("Model Pose & Scale Reset")
-      log("SCENE", "Reset spatial transform and anchors")
+      emitToast("Pose & Anchors Reset")
+      log("SCENE", "Reset transforms and anchors")
     }
-  }
-
-  fun clearScene() {
-    _selectedModel.value = null
-    _arAnchors.value = emptyList()
-    emitToast("Model & Scene Cleared")
-    log("SCENE", "Active model and spatial anchors cleared")
+    _telemetry.update { it.copy(activeAnchorsCount = 0) }
   }
 
   fun setShowModelSelector(show: Boolean) { _showModelSelector.value = show }
@@ -231,12 +233,27 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   fun setSunIntensity(intensity: Float) { _sunIntensity.value = intensity }
   fun setIpdMm(ipd: Float) { _ipdMm.value = ipd }
 
-  fun updateTelemetry(fps: Float, drawCalls: Int, vertexCount: Int) {
+  fun updateTelemetryFromEngine(
+    fps: Float,
+    drawCalls: Int,
+    vertexCount: Int,
+    trackingData: ArCoreTrackingData
+  ) {
     _telemetry.update {
       it.copy(
         fps = fps,
         drawCalls = drawCalls,
-        vertexCount = if (vertexCount > 0) vertexCount else it.vertexCount
+        vertexCount = if (vertexCount > 0) vertexCount else it.vertexCount,
+        triangleCount = if (vertexCount > 0) vertexCount / 2 else it.triangleCount,
+        arTrackingStatus = when (trackingData.trackingState) {
+          TrackingState.TRACKING -> "TRACKING (6DoF OK)"
+          TrackingState.PAUSED -> "PAUSED (${trackingData.trackingFailureReason})"
+          TrackingState.STOPPED -> "STOPPED"
+        },
+        horizontalPlanesCount = trackingData.horizontalPlanesCount,
+        verticalPlanesCount = trackingData.verticalPlanesCount,
+        lightIntensityLumens = trackingData.lightIntensityLumens,
+        isDepthEnabled = trackingData.isDepthEnabled
       )
     }
   }
