@@ -82,16 +82,35 @@ fun DiagnosticsHud(
         modifier = Modifier.fillMaxWidth()
       ) {
         Text(
-          text = "ENGINE: Filament gltfio",
+          text = "SCALE: 1:1 Metric (1u=1m)",
           fontFamily = FontFamily.Monospace,
           fontSize = 11.sp,
-          color = Color(0xFF38BDF8)
+          color = Color(0xFF4ADE80)
         )
         Text(
           text = "AR: ${telemetry.arTrackingStatus}",
           fontFamily = FontFamily.Monospace,
           fontSize = 11.sp,
           color = if (telemetry.arTrackingStatus.contains("TRACKING")) Color(0xFF22C55E) else Color(0xFFEAB308)
+        )
+      }
+
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth()
+      ) {
+        Text(
+          text = "Depth: ${String.format("%.2f", telemetry.depthAvgMeters)}m ${if (telemetry.depthOcclusionDetected) "[OCCLUSION ON]" else ""}",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = if (telemetry.depthOcclusionDetected) Color(0xFFF43F5E) else Color(0xFF38BDF8)
+        )
+        Text(
+          text = "Thermal: ${telemetry.thermalStatus}",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = Color(0xFFCBD5E1)
         )
       }
 

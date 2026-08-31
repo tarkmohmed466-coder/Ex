@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,16 +39,19 @@ fun AnimationControlBar(
   currentTimeSec: Float,
   durationSec: Float,
   speed: Float,
+  currentTrack: Int = 0,
+  totalTracks: Int = 1,
   onPlayPauseToggle: () -> Unit,
   onSpeedChange: (Float) -> Unit,
   onScrubTime: (Float) -> Unit,
+  onTrackChange: (Int) -> Unit = {},
   modifier: Modifier = Modifier
 ) {
   Box(
     modifier = modifier
       .clip(RoundedCornerShape(24.dp))
-      .background(Color(0xFF0F172A).copy(alpha = 0.85f))
-      .padding(horizontal = 16.dp, vertical = 8.dp)
+      .background(Color(0xFF0F172A).copy(alpha = 0.88f))
+      .padding(horizontal = 16.dp, vertical = 10.dp)
       .testTag("animation_control_bar")
   ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -88,6 +93,16 @@ fun AnimationControlBar(
           modifier = Modifier
             .weight(1f)
             .testTag("anim_scrub_slider")
+        )
+
+        Spacer(modifier = Modifier.width(10.dp))
+
+        // Timestamp
+        Text(
+          text = "${String.format("%.1f", currentTimeSec)}s / ${String.format("%.1f", durationSec)}s",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 11.sp,
+          color = Color(0xFF94A3B8)
         )
 
         Spacer(modifier = Modifier.width(10.dp))

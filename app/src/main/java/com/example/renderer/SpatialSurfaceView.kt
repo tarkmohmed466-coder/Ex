@@ -3,28 +3,38 @@ package com.example.renderer
 import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
-import android.opengl.Matrix
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
 import android.util.Log
 import android.view.Choreographer
 import android.view.MotionEvent
+import android.view.PixelCopy
 import android.view.ScaleGestureDetector
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import com.example.arcore.ArCoreSessionManager
 import com.example.arcore.ArCoreTrackingData
+import com.example.arcore.DepthOcclusionManager
+import com.example.engine.TwoFingerRotateDetector
 import com.example.model.DisplayMode
 import com.google.ar.core.Anchor
+import com.google.ar.core.Pose
 import com.google.ar.core.TrackingState
 import java.nio.ByteBuffer
 import kotlin.math.abs
 
 /**
  * High-performance Android SurfaceView bridging Google Filament and Google ARCore.
- * Supports Choreographer-driven 60+ FPS rendering, ARCore 6DoF camera synchronization,
- * Environmental HDR lighting, physical plane hit-testing & anchoring, and Dual-Viewport MR Stereo.
+ * Supports:
+ * - 60+ FPS Choreographer-driven rendering.
+ * - ARCore 6DoF Camera synchronization & plane anchoring.
+ * - Real 16-bit Depth extraction & Depth Occlusion processing.
+ * - Real-world 1:1 Metric Scale (1 unit = 1 physical meter).
+ * - Multi-Anchor spatial management.
+ * - Dual-Viewport Asymmetric Off-Axis Stereoscopic MR Pipeline.
+ * - Two-finger rotation, pan, pinch zoom gestures.
+ * - Hardware PixelCopy frame snapshots.
  */
 class SpatialSurfaceView @JvmOverloads constructor(
   context: Context,
@@ -37,6 +47,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
   val filamentEngine = FilamentEngineHolder(context)
   val arCoreSessionManager = ArCoreSessionManager(context)
+  val depthOcclusionManager = DepthOcclusionManager()
 
   private var isSurfaceReady = false
   private var isRendering = false
@@ -53,11 +64,12 @@ class SpatialSurfaceView @JvmOverloads constructor(
       updateModeConfiguration()
     }
 
-  // Active Anchors mapped to ARCore Anchor instances
-  private val activeArAnchors = mutableListOf<Anchor>()
+  // Active Placed Anchors mapped to ARCore Anchor instances
+  val activeArAnchors = mutableListOf<Anchor>()
 
   // Gesture Detectors
   private val scaleGestureDetector: ScaleGestureDetector
+  private val rotateGestureDetector: TwoFingerRotateDetector
   private var lastTouchX = 0f
   private var lastTouchY = 0f
   private var activePointerCount = 0
@@ -100,6 +112,14 @@ class SpatialSurfaceView @JvmOverloads constructor(
         }
       }
     )
+
+    rotateGestureDetector = TwoFingerRotateDetector { deltaDegrees ->
+      if (displayMode == DisplayMode.OBJECT) {
+        filamentEngine.orbitYaw += deltaDegrees
+      } else {
+        filamentEngine.modelRotationDegrees += deltaDegrees
+      }
+    }
   }
 
   fun resume(activity: Activity) {
@@ -116,10 +136,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
   fun destroy() {
     stopRendering()
-    for (anchor in activeArAnchors) {
-      anchor.detach()
-    }
-    activeArAnchors.clear()
+    clearAnchors()
     arCoreSessionManager.destroySession()
     filamentEngine.destroy()
   }
@@ -170,7 +187,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
   override fun doFrame(frameTimeNanos: Long) {
     if (!isRendering || !isSurfaceReady) return
 
-    // Calculate FPS
+    // Calculate FPS & Telemetry
     frameCount++
     if (lastFrameTimestamp == 0L) lastFrameTimestamp = frameTimeNanos
     val elapsedMs = (frameTimeNanos - fpsTimer) / 1_000_000L
@@ -202,7 +219,11 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
           filamentEngine.setCameraFromArCore(projMatrix, viewMatrix)
 
-          // Update active anchor poses
+          // Process Depth Occlusion
+          val anchorPoses = activeArAnchors.filter { it.trackingState == TrackingState.TRACKING }.map { it.pose }
+          depthOcclusionManager.processFrameDepth(frame, anchorPoses)
+
+          // Update multi-anchors & primary model pose
           val currentAsset = filamentEngine.currentAsset
           if (currentAsset != null && activeArAnchors.isNotEmpty()) {
             val primaryAnchor = activeArAnchors.lastOrNull()
@@ -223,8 +244,17 @@ class SpatialSurfaceView @JvmOverloads constructor(
         } else {
           null
         }
-        val ipdMeters = (filamentEngine.ambientIntensity / 1000f).coerceIn(0.055f, 0.075f) // fallback or default 64mm
-        filamentEngine.renderStereoFrame(frameTimeNanos, 0.064f, headPoseMatrix)
+
+        // Process Depth in MR
+        if (frame != null) {
+          depthOcclusionManager.processFrameDepth(
+            frame,
+            activeArAnchors.filter { it.trackingState == TrackingState.TRACKING }.map { it.pose }
+          )
+        }
+
+        val ipdMeters = 0.064f // Default 64mm IPD
+        filamentEngine.renderStereoFrame(frameTimeNanos, ipdMeters, headPoseMatrix)
       }
     }
 
@@ -234,6 +264,10 @@ class SpatialSurfaceView @JvmOverloads constructor(
   }
 
   override fun onTouchEvent(event: MotionEvent): Boolean {
+    // 1. Check two-finger rotate gesture
+    val isRotating = rotateGestureDetector.onTouchEvent(event)
+
+    // 2. Check pinch-to-zoom scale gesture
     scaleGestureDetector.onTouchEvent(event)
 
     when (event.actionMasked) {
@@ -251,7 +285,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
       }
 
       MotionEvent.ACTION_MOVE -> {
-        if (!scaleGestureDetector.isInProgress) {
+        if (!scaleGestureDetector.isInProgress && !isRotating) {
           val dx = event.x - lastTouchX
           val dy = event.y - lastTouchY
 
@@ -293,7 +327,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
   }
 
   private fun handleTap(xPx: Float, yPx: Float) {
-    if (displayMode == DisplayMode.AR) {
+    if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
       val frame = arCoreSessionManager.latestFrame ?: return
       val hit = arCoreSessionManager.hitTest(frame, xPx, yPx)
       if (hit != null) {
@@ -307,6 +341,30 @@ class SpatialSurfaceView @JvmOverloads constructor(
         }
       }
     }
+  }
+
+  /**
+   * Captures the exact rendered hardware surface frame using Android PixelCopy.
+   */
+  fun captureSnapshot(onCaptured: (Bitmap) -> Unit, onError: (String) -> Unit) {
+    if (!isSurfaceReady || width <= 0 || height <= 0) {
+      onError("Surface not ready for snapshot")
+      return
+    }
+
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    PixelCopy.request(
+      this,
+      bitmap,
+      { copyResult ->
+        if (copyResult == PixelCopy.SUCCESS) {
+          onCaptured(bitmap)
+        } else {
+          onError("PixelCopy failed with status: $copyResult")
+        }
+      },
+      Handler(Looper.getMainLooper())
+    )
   }
 
   fun loadGlbBuffer(buffer: ByteBuffer, title: String) {

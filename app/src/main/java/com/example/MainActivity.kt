@@ -128,6 +128,8 @@ fun MixedRealityScreen(
   val autoRotate by viewModel.autoRotate.collectAsState()
   val isPlayingAnimation by viewModel.isPlayingAnimation.collectAsState()
   val animationSpeed by viewModel.animationSpeed.collectAsState()
+  val currentAnimationTimeSec by viewModel.currentAnimationTimeSec.collectAsState()
+  val selectedAnimationTrack by viewModel.selectedAnimationTrack.collectAsState()
   val ambientIntensity by viewModel.ambientIntensity.collectAsState()
   val sunIntensity by viewModel.sunIntensity.collectAsState()
   val ipdMm by viewModel.ipdMm.collectAsState()
@@ -164,7 +166,15 @@ fun MixedRealityScreen(
   val spatialSurfaceView = remember {
     SpatialSurfaceView(context).apply {
       onTelemetryUpdate = { fps, drawCalls, vertexCount, trackingData ->
-        viewModel.updateTelemetryFromEngine(fps, drawCalls, vertexCount, trackingData)
+        val dims = "${String.format("%.2f", filamentEngine.modelPhysicalWidthMeters)}m x ${String.format("%.2f", filamentEngine.modelPhysicalHeightMeters)}m x ${String.format("%.2f", filamentEngine.modelPhysicalDepthMeters)}m"
+        viewModel.updateTelemetryFromEngine(
+          fps = fps,
+          drawCalls = drawCalls,
+          vertexCount = vertexCount,
+          trackingData = trackingData,
+          depthManager = depthOcclusionManager,
+          modelDimensions = dims
+        )
       }
       onAnchorPlaced = { anchor, hitPos ->
         viewModel.addPlacedAnchor("anchor_${anchor.hashCode()}", hitPos)
@@ -322,9 +332,11 @@ fun MixedRealityScreen(
       ) {
         AnimationControlBar(
           isPlaying = isPlayingAnimation,
-          currentTimeSec = 0f,
+          currentTimeSec = currentAnimationTimeSec,
           durationSec = selectedModel?.animationDurationSec ?: 4.0f,
           speed = animationSpeed,
+          currentTrack = selectedAnimationTrack,
+          totalTracks = spatialSurfaceView.filamentEngine.getAnimationTrackCount(),
           onPlayPauseToggle = {
             hapticManager.performClick()
             viewModel.toggleAnimationPlay()
@@ -332,7 +344,10 @@ fun MixedRealityScreen(
           onSpeedChange = { speed ->
             viewModel.setAnimationSpeed(speed)
           },
-          onScrubTime = { /* scrub time */ }
+          onScrubTime = { time ->
+            viewModel.scrubAnimation(time)
+            spatialSurfaceView.filamentEngine.seekAnimationTo(time)
+          }
         )
       }
     }
@@ -355,9 +370,14 @@ fun MixedRealityScreen(
             flashAnim.snapTo(0.85f)
             flashAnim.animateTo(0f, tween(350))
           }
-          viewModel.saveSnapshot(
-            android.graphics.Bitmap.createBitmap(1080, 1920, android.graphics.Bitmap.Config.ARGB_8888),
-            context
+          // Perform genuine hardware PixelCopy snapshot
+          spatialSurfaceView.captureSnapshot(
+            onCaptured = { bmp ->
+              viewModel.saveSnapshot(bmp, context)
+            },
+            onError = { errMsg ->
+              viewModel.log("SNAPSHOT_ERR", errMsg)
+            }
           )
         },
         onRecClick = {
