@@ -1,0 +1,6 @@
+{
+  "name": "Mixed Reality",
+  "description": "Mixed Reality 3D, AR, and MR spatial viewer with GLB rendering, stereo MR mode, and interactive controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
