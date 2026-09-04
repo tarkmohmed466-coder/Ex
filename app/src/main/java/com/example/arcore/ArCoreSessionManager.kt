@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.Manifest
+import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.ar.core.Anchor
@@ -125,6 +126,7 @@ class ArCoreSessionManager(private val context: Context) {
 
   private var cameraTextureId: Int = 0
   private var userRequestedInstall = true
+  private var availabilityChecked = false
 
   // Initial camera position for walking distance calculation
   private var initialCameraPose: Pose? = null
@@ -146,9 +148,33 @@ class ArCoreSessionManager(private val context: Context) {
   var onImageTrackingStateChanged: ((markerName: String, state: ImageTrackingState, anchor: Anchor?, pose: Pose) -> Unit)? = null
 
   /**
+   * Checks if the Google Play Services for AR APK is installed on this device.
+   */
+  fun isArCorePackageInstalled(): Boolean {
+    return try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        context.packageManager.getPackageInfo("com.google.ar.core", PackageManager.PackageInfoFlags.of(0))
+      } else {
+        @Suppress("DEPRECATION")
+        context.packageManager.getPackageInfo("com.google.ar.core", 0)
+      }
+      true
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  /**
    * Checks if ARCore is supported on this device.
    */
   fun checkAvailability(activity: Activity, onResult: (Boolean) -> Unit) {
+    if (!isArCorePackageInstalled()) {
+      isSupported = false
+      availabilityChecked = true
+      onResult(false)
+      return
+    }
+
     try {
       val availability = ArCoreApk.getInstance().checkAvailability(context)
       if (availability.isTransient) {
@@ -156,10 +182,12 @@ class ArCoreSessionManager(private val context: Context) {
         return
       }
       isSupported = availability.isSupported
+      availabilityChecked = true
       onResult(isSupported)
-    } catch (e: Exception) {
-      Log.w(TAG, "ARCore availability check failed: ${e.message}")
+    } catch (t: Throwable) {
+      Log.w(TAG, "ARCore availability check failed: ${t.message}")
       isSupported = false
+      availabilityChecked = true
       onResult(false)
     }
   }
@@ -169,11 +197,41 @@ class ArCoreSessionManager(private val context: Context) {
    */
   fun setupSession(activity: Activity): Boolean {
     if (session != null) return true
+    if (availabilityChecked && !isSupported) return false
+
+    // If ARCore package is not installed on the device, avoid calling ARCore install service which will fail
+    // when Google Play Store is not installed or service cannot be bound
+    if (!isArCorePackageInstalled()) {
+      isSupported = false
+      availabilityChecked = true
+      Log.i(TAG, "ARCore package not installed on device. Operating in CameraX fallback mode.")
+      return false
+    }
+
+    // Check availability first to avoid throwing runtime exceptions in ARCoreApk on emulators or unsupported devices
+    if (!availabilityChecked) {
+      try {
+        val availability = ArCoreApk.getInstance().checkAvailability(context)
+        if (!availability.isTransient) {
+          isSupported = availability.isSupported
+          availabilityChecked = true
+          if (!isSupported) {
+            Log.i(TAG, "ARCore is unsupported on this hardware ($availability). Operating in graceful fallback mode.")
+            return false
+          }
+        }
+      } catch (t: Throwable) {
+        Log.w(TAG, "ARCore availability pre-check failed: ${t.message}")
+        isSupported = false
+        availabilityChecked = true
+        return false
+      }
+    }
 
     return try {
       when (ArCoreApk.getInstance().requestInstall(activity, userRequestedInstall)) {
         ArCoreApk.InstallStatus.INSTALLED -> {
-          val newSession = Session(context)
+          val newSession = Session(activity)
           val config = Config(newSession)
 
           // Enable Horizontal and Vertical Plane detection
@@ -219,15 +277,18 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
     } catch (e: UnavailableUserDeclinedInstallationException) {
-      Log.w(TAG, "User declined ARCore installation", e)
+      Log.w(TAG, "User declined ARCore installation")
+      userRequestedInstall = false
       isSupported = false
       false
     } catch (e: UnavailableDeviceNotCompatibleException) {
-      Log.w(TAG, "Device not compatible with ARCore", e)
+      Log.w(TAG, "Device not compatible with ARCore")
+      userRequestedInstall = false
       isSupported = false
       false
-    } catch (e: Exception) {
-      Log.w(TAG, "ARCore session initialization failed: ${e.message}")
+    } catch (t: Throwable) {
+      Log.w(TAG, "ARCore session initialization failed: ${t.message}")
+      userRequestedInstall = false
       isSupported = false
       false
     }

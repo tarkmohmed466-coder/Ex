@@ -59,9 +59,23 @@ object HardwareCapabilityDetector {
     // ARCore availability
     var isArcore = false
     try {
-      val arcoreStatus = ArCoreApk.getInstance().checkAvailability(context)
-      isArcore = arcoreStatus.isSupported
-    } catch (_: Exception) {}
+      val isArCoreInstalled = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+          context.packageManager.getPackageInfo("com.google.ar.core", android.content.pm.PackageManager.PackageInfoFlags.of(0))
+        } else {
+          @Suppress("DEPRECATION")
+          context.packageManager.getPackageInfo("com.google.ar.core", 0)
+        }
+        true
+      } catch (_: Exception) {
+        false
+      }
+
+      if (isArCoreInstalled) {
+        val arcoreStatus = ArCoreApk.getInstance().checkAvailability(context)
+        isArcore = arcoreStatus.isSupported
+      }
+    } catch (_: Throwable) {}
 
     // GLES Version
     val glEsVersion = activityManager?.deviceConfigurationInfo?.glEsVersion ?: "3.0"

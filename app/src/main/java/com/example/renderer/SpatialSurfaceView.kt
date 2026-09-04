@@ -228,10 +228,12 @@ class SpatialSurfaceView @JvmOverloads constructor(
   fun resume(activity: Activity) {
     if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
       sensorsManager.start()
-      try {
-        arCoreSessionManager.resumeSession(activity)
-      } catch (e: Exception) {
-        Log.w(TAG, "ARCore resume skipped: ${e.message}")
+      if (arCoreSessionManager.isArCorePackageInstalled()) {
+        try {
+          arCoreSessionManager.resumeSession(activity)
+        } catch (e: Exception) {
+          Log.w(TAG, "ARCore resume skipped: ${e.message}")
+        }
       }
     }
     startRendering()
@@ -299,10 +301,12 @@ class SpatialSurfaceView @JvmOverloads constructor(
       }
       DisplayMode.AR, DisplayMode.MR -> {
         sensorsManager.start()
-        try {
-          (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }
-        } catch (e: Exception) {
-          Log.w(TAG, "ARCore resume skipped: ${e.message}")
+        if (arCoreSessionManager.isArCorePackageInstalled()) {
+          try {
+            (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }
+          } catch (e: Exception) {
+            Log.w(TAG, "ARCore resume skipped: ${e.message}")
+          }
         }
       }
     }

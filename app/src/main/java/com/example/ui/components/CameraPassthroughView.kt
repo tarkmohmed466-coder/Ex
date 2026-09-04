@@ -62,102 +62,97 @@ fun CameraPassthroughView(
   val context = LocalContext.current
   val lifecycleOwner = LocalLifecycleOwner.current
 
-  // Dual-Viewport Stereoscopic / Single Camera OpenGL View
-  val dualCameraView = remember {
-    DualCameraGLSurfaceView(context).also {
-      onDualCameraCreated?.invoke(it)
-    }
-  }
-
-  DisposableEffect(lifecycleOwner, dualCameraView) {
-    val observer = LifecycleEventObserver { _, event ->
-      when (event) {
-        Lifecycle.Event.ON_RESUME -> dualCameraView.onResume()
-        Lifecycle.Event.ON_PAUSE -> dualCameraView.onPause()
-        Lifecycle.Event.ON_DESTROY -> dualCameraView.release()
-        else -> {}
-      }
-    }
-    lifecycleOwner.lifecycle.addObserver(observer)
-    onDispose {
-      lifecycleOwner.lifecycle.removeObserver(observer)
-      dualCameraView.release()
-    }
-  }
-
-  // Bind CameraX ONLY as fallback when ARCore is not actively running camera
-  DisposableEffect(lifecycleOwner, displayMode, hasCameraPermission, isArCoreActive) {
-    val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-    val executor = ContextCompat.getMainExecutor(context)
-    var isDisposed = false
-
-    cameraProviderFuture.addListener({
-      if (isDisposed) return@addListener
-      try {
-        val cameraProvider = cameraProviderFuture.get()
-        cameraProvider.unbindAll()
-
-        if ((displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) && hasCameraPermission) {
-          dualCameraView.displayMode = displayMode
-          if (!isArCoreActive) {
-            // CameraX Fallback when ARCore is unavailable
-            val preview = Preview.Builder()
-              .setTargetResolution(Size(1280, 720))
-              .build()
-              .also {
-                it.setSurfaceProvider(executor) { request ->
-                  dualCameraView.provideSurface(request, executor)
-                }
-              }
-
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-            if (cameraProvider.hasCamera(cameraSelector)) {
-              cameraProvider.bindToLifecycle(
-                lifecycleOwner,
-                cameraSelector,
-                preview
-              )
-              Log.i("CameraPassthroughView", "CameraX bound with DualCameraGLSurfaceView as fallback")
-            }
-          } else {
-            Log.i("CameraPassthroughView", "ARCore active: CameraX bypassed for zero temporal jitter synchronization")
-          }
-        } else {
-          // In Object Mode or without camera permission: detach camera and reset
-          dualCameraView.displayMode = DisplayMode.OBJECT
-          dualCameraView.detachCamera()
-        }
-      } catch (e: Exception) {
-        Log.e("CameraPassthroughView", "Camera binding error: ${e.message}", e)
-      }
-    }, executor)
-
-    onDispose {
-      isDisposed = true
-      try {
-        if (cameraProviderFuture.isDone) {
-          cameraProviderFuture.get().unbindAll()
-        }
-      } catch (e: Exception) {
-        Log.w("CameraPassthroughView", "Error unbinding camera on dispose: ${e.message}")
-      }
-      dualCameraView.detachCamera()
-    }
-  }
+  val isCameraRequired = (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) && hasCameraPermission
 
   Box(
     modifier = modifier
       .fillMaxSize()
       .background(Color(0xFF0B0F19))
+      .testTag("camerax_preview_view")
   ) {
-    // 1. Dual Camera Viewport - active and visible only in AR/MR modes with permission
-    AndroidView(
-      factory = { dualCameraView },
-      modifier = Modifier
-        .fillMaxSize()
-        .alpha(if (displayMode == DisplayMode.OBJECT || !hasCameraPermission) 0f else 1f)
-        .testTag("camerax_preview_view")
-    )
+    // 1. Dual Camera Viewport - active and mounted ONLY in AR/MR modes with permission granted
+    if (isCameraRequired) {
+      val dualCameraView = remember {
+        DualCameraGLSurfaceView(context).also {
+          onDualCameraCreated?.invoke(it)
+        }
+      }
+
+      DisposableEffect(lifecycleOwner, dualCameraView) {
+        val observer = LifecycleEventObserver { _, event ->
+          when (event) {
+            Lifecycle.Event.ON_RESUME -> dualCameraView.onResume()
+            Lifecycle.Event.ON_PAUSE -> dualCameraView.onPause()
+            Lifecycle.Event.ON_DESTROY -> dualCameraView.release()
+            else -> {}
+          }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+          lifecycleOwner.lifecycle.removeObserver(observer)
+          dualCameraView.release()
+        }
+      }
+
+      // Bind CameraX ONLY as fallback when ARCore is not actively running camera
+      DisposableEffect(lifecycleOwner, displayMode, isArCoreActive, dualCameraView) {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        val executor = ContextCompat.getMainExecutor(context)
+        var isDisposed = false
+
+        cameraProviderFuture.addListener({
+          if (isDisposed) return@addListener
+          try {
+            val cameraProvider = cameraProviderFuture.get()
+            cameraProvider.unbindAll()
+
+            dualCameraView.displayMode = displayMode
+            if (!isArCoreActive) {
+              // CameraX Fallback when ARCore is unavailable
+              val preview = Preview.Builder()
+                .setTargetResolution(Size(1280, 720))
+                .build()
+                .also {
+                  it.setSurfaceProvider(executor) { request ->
+                    dualCameraView.provideSurface(request, executor)
+                  }
+                }
+
+              val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+              if (cameraProvider.hasCamera(cameraSelector)) {
+                cameraProvider.bindToLifecycle(
+                  lifecycleOwner,
+                  cameraSelector,
+                  preview
+                )
+                Log.i("CameraPassthroughView", "CameraX bound with DualCameraGLSurfaceView as fallback")
+              }
+            } else {
+              Log.i("CameraPassthroughView", "ARCore active: CameraX bypassed for zero temporal jitter synchronization")
+            }
+          } catch (e: Exception) {
+            Log.e("CameraPassthroughView", "Camera binding error: ${e.message}", e)
+          }
+        }, executor)
+
+        onDispose {
+          isDisposed = true
+          try {
+            if (cameraProviderFuture.isDone) {
+              cameraProviderFuture.get().unbindAll()
+            }
+          } catch (e: Exception) {
+            Log.w("CameraPassthroughView", "Error unbinding camera on dispose: ${e.message}")
+          }
+          dualCameraView.detachCamera()
+        }
+      }
+
+      AndroidView(
+        factory = { dualCameraView },
+        modifier = Modifier.fillMaxSize()
+      )
+    }
 
     // 2. Permission Request Card - shown in AR/MR modes when camera permission is missing
     if (!hasCameraPermission && displayMode != DisplayMode.OBJECT) {
