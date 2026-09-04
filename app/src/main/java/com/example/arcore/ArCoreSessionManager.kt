@@ -2,7 +2,10 @@ package com.example.arcore
 
 import android.app.Activity
 import android.content.Context
+import android.content.pm.PackageManager
+import android.Manifest
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.google.ar.core.Anchor
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.AugmentedImage
@@ -141,16 +144,64 @@ class ArCoreSessionManager(private val context: Context) {
     return imageDatabase
   }
 
+  private fun isPackageInstalled(context: Context, packageName: String): Boolean {
+    return try {
+      context.packageManager.getPackageInfo(packageName, 0)
+      true
+    } catch (e: Exception) {
+      false
+    }
+  }
+
   /**
    * Initializes or resumes the ARCore Session with optimal configuration:
    * Autofocus, Horizontal + Vertical planes, AugmentedImageDatabase, Environmental HDR, and Depth.
    */
   fun resumeSession(activity: Activity): Boolean {
+    if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+      Log.w(TAG, "Cannot resume ARCore: Camera permission not granted yet")
+      return false
+    }
+
     if (session == null) {
-      try {
-        val installStatus = ArCoreApk.getInstance().requestInstall(activity, userRequestedInstall)
-        if (installStatus == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
+      val isArCoreInstalled = isPackageInstalled(activity, "com.google.ar.core")
+      if (!isArCoreInstalled) {
+        val isPlayStoreAvailable = isPackageInstalled(activity, "com.android.vending")
+        if (!isPlayStoreAvailable) {
+          Log.i(TAG, "ARCore APK not installed and Google Play Store unavailable. Using device sensors fallback.")
+          isSupported = false
           userRequestedInstall = false
+          return false
+        }
+
+        if (userRequestedInstall) {
+          try {
+            val installStatus = ArCoreApk.getInstance().requestInstall(activity, userRequestedInstall)
+            if (installStatus == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
+              userRequestedInstall = false
+              return false
+            }
+          } catch (t: Throwable) {
+            Log.w(TAG, "ARCore installer request skipped: ${t.message}")
+            userRequestedInstall = false
+            isSupported = false
+            return false
+          }
+        }
+
+        // If com.google.ar.core is still not present, bypass Session creation
+        if (!isPackageInstalled(activity, "com.google.ar.core")) {
+          Log.i(TAG, "ARCore APK not present on system. Running in sensor-driven AR/MR mode.")
+          isSupported = false
+          return false
+        }
+      }
+
+      try {
+        val availability = ArCoreApk.getInstance().checkAvailability(context)
+        if (availability == ArCoreApk.Availability.UNSUPPORTED_DEVICE_NOT_CAPABLE) {
+          Log.i(TAG, "Device/Emulator is not ARCore capable. Using sensor & gyro fallback.")
+          isSupported = false
           return false
         }
 
@@ -172,24 +223,34 @@ class ArCoreSessionManager(private val context: Context) {
         newSession.configure(config)
         session = newSession
         isConfigured = true
+        isSupported = true
         Log.i(TAG, "ARCore Session configured with Environmental HDR, Depth: ${config.depthMode}, & ImageDatabase (${imageDatabase.numImages} targets)")
       } catch (e: UnavailableArcoreNotInstalledException) {
-        Log.e(TAG, "ARCore not installed", e)
+        Log.w(TAG, "ARCore APK not installed on this system: ${e.message}")
+        userRequestedInstall = false
+        isSupported = false
         return false
       } catch (e: UnavailableUserDeclinedInstallationException) {
-        Log.e(TAG, "ARCore installation declined", e)
+        Log.w(TAG, "ARCore installation declined: ${e.message}")
+        userRequestedInstall = false
         return false
       } catch (e: UnavailableDeviceNotCompatibleException) {
-        Log.e(TAG, "Device not compatible with ARCore", e)
+        Log.w(TAG, "Device not compatible with ARCore: ${e.message}")
+        userRequestedInstall = false
+        isSupported = false
         return false
       } catch (e: UnavailableApkTooOldException) {
-        Log.e(TAG, "ARCore APK too old", e)
+        Log.w(TAG, "ARCore APK too old: ${e.message}")
+        userRequestedInstall = false
         return false
       } catch (e: UnavailableSdkTooOldException) {
-        Log.e(TAG, "ARCore SDK too old", e)
+        Log.w(TAG, "ARCore SDK too old: ${e.message}")
+        userRequestedInstall = false
         return false
-      } catch (e: Exception) {
-        Log.e(TAG, "Failed to create ARCore Session", e)
+      } catch (t: Throwable) {
+        Log.w(TAG, "Bypassed ARCore session on this device/emulator: ${t.message}")
+        userRequestedInstall = false
+        isSupported = false
         return false
       }
     }

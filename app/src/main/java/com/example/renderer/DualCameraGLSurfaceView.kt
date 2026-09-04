@@ -74,7 +74,11 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   var displayMode: DisplayMode = DisplayMode.OBJECT
     set(value) {
       field = value
-      requestRender()
+      try {
+        requestRender()
+      } catch (e: Exception) {
+        // Safe when paused or detached
+      }
     }
 
   private val vertexBuffer: FloatBuffer
@@ -116,53 +120,99 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   }
 
   fun provideSurface(request: SurfaceRequest, exec: Executor) {
-    queueEvent {
-      pendingRequest = request
-      executor = exec
-      val st = surfaceTexture
-      if (st != null) {
-        attachCameraRequest(request, exec, st)
+    try {
+      queueEvent {
+        pendingRequest = request
+        executor = exec
+        val st = surfaceTexture
+        if (st != null) {
+          attachCameraRequest(request, exec, st)
+        }
       }
+      requestRender()
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed queueEvent for provideSurface: ${e.message}")
+    }
+  }
+
+  fun detachCamera() {
+    try {
+      queueEvent {
+        pendingRequest = null
+        cameraSurface?.release()
+        cameraSurface = null
+        hasNewFrame = false
+      }
+      requestRender()
+    } catch (e: Exception) {
+      Log.w(TAG, "detachCamera error: ${e.message}")
     }
   }
 
   private fun attachCameraRequest(request: SurfaceRequest, exec: Executor, st: SurfaceTexture) {
-    st.setDefaultBufferSize(request.resolution.width, request.resolution.height)
-    val surface = Surface(st)
-    cameraSurface = surface
-    request.provideSurface(surface, exec) {
-      surface.release()
+    try {
+      cameraSurface?.release()
       cameraSurface = null
+      st.setDefaultBufferSize(request.resolution.width, request.resolution.height)
+      val surface = Surface(st)
+      cameraSurface = surface
+      request.provideSurface(surface, exec) {
+        try {
+          surface.release()
+        } catch (e: Exception) {
+          Log.w(TAG, "Error releasing camera surface: ${e.message}")
+        }
+        if (cameraSurface == surface) {
+          cameraSurface = null
+        }
+      }
+      Log.i(TAG, "Camera surface attached: ${request.resolution.width}x${request.resolution.height}")
+      requestRender()
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed attaching camera surface: ${e.message}", e)
     }
-    Log.i(TAG, "Camera surface attached: ${request.resolution.width}x${request.resolution.height}")
   }
 
   override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-    program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
-    aPositionHandle = GLES20.glGetAttribLocation(program, "aPosition")
-    aTexCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
-    uTexMatrixHandle = GLES20.glGetUniformLocation(program, "uTexMatrix")
-    uTextureHandle = GLES20.glGetUniformLocation(program, "uTexture")
+    try {
+      if (textureId != 0) {
+        GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)
+        textureId = 0
+      }
+      if (program != 0) {
+        GLES20.glDeleteProgram(program)
+        program = 0
+      }
 
-    val textures = IntArray(1)
-    GLES20.glGenTextures(1, textures, 0)
-    textureId = textures[0]
+      program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
+      aPositionHandle = GLES20.glGetAttribLocation(program, "aPosition")
+      aTexCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
+      uTexMatrixHandle = GLES20.glGetUniformLocation(program, "uTexMatrix")
+      uTextureHandle = GLES20.glGetUniformLocation(program, "uTexture")
 
-    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
-    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+      val textures = IntArray(1)
+      GLES20.glGenTextures(1, textures, 0)
+      textureId = textures[0]
 
-    val st = SurfaceTexture(textureId)
-    st.setOnFrameAvailableListener(this)
-    surfaceTexture = st
+      GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+      GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+      GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+      GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+      GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
-    val req = pendingRequest
-    val exec = executor
-    if (req != null && exec != null) {
-      attachCameraRequest(req, exec, st)
-      pendingRequest = null
+      val st = SurfaceTexture(textureId)
+      st.setOnFrameAvailableListener(this)
+      surfaceTexture = st
+
+      val req = pendingRequest
+      val exec = executor
+      if (req != null && exec != null) {
+        attachCameraRequest(req, exec, st)
+        pendingRequest = null
+      }
+      requestRender()
+    } catch (e: Exception) {
+      Log.e(TAG, "Error in onSurfaceCreated: ${e.message}", e)
     }
   }
 
@@ -173,57 +223,65 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
 
   override fun onFrameAvailable(st: SurfaceTexture?) {
     hasNewFrame = true
-    requestRender()
+    try {
+      requestRender()
+    } catch (e: Exception) {
+      // Safe when view is pausing or destroyed
+    }
   }
 
   override fun onDrawFrame(gl: GL10?) {
-    GLES20.glClearColor(0.043f, 0.059f, 0.098f, 1.0f)
-    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
-    if (displayMode == DisplayMode.OBJECT) return
-
-    val st = surfaceTexture ?: return
     try {
+      GLES20.glClearColor(0.043f, 0.059f, 0.098f, 1.0f)
+      GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+      if (displayMode == DisplayMode.OBJECT) return
+
+      val st = surfaceTexture ?: return
       if (hasNewFrame) {
-        st.updateTexImage()
-        st.getTransformMatrix(texMatrix)
+        try {
+          st.updateTexImage()
+          st.getTransformMatrix(texMatrix)
+        } catch (e: Exception) {
+          Log.w(TAG, "updateTexImage skipped: ${e.message}")
+        }
         hasNewFrame = false
       }
+
+      if (program == 0) return
+
+      GLES20.glUseProgram(program)
+      GLES20.glUniformMatrix4fv(uTexMatrixHandle, 1, false, texMatrix, 0)
+      GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+      GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+      GLES20.glUniform1i(uTextureHandle, 0)
+
+      GLES20.glEnableVertexAttribArray(aPositionHandle)
+      GLES20.glVertexAttribPointer(aPositionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
+
+      GLES20.glEnableVertexAttribArray(aTexCoordHandle)
+      GLES20.glVertexAttribPointer(aTexCoordHandle, 2, GLES20.GL_FLOAT, false, 0, texBuffer)
+
+      if (displayMode == DisplayMode.MR) {
+        val halfWidth = maxOf(viewWidth / 2, 1)
+        // 1. Left Eye (Left Camera Viewport)
+        GLES20.glViewport(0, 0, halfWidth, viewHeight)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+        // 2. Right Eye (Right Camera Viewport)
+        GLES20.glViewport(halfWidth, 0, halfWidth, viewHeight)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+      } else {
+        // Single Camera Viewport (AR Mode)
+        GLES20.glViewport(0, 0, viewWidth, viewHeight)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+      }
+
+      GLES20.glDisableVertexAttribArray(aPositionHandle)
+      GLES20.glDisableVertexAttribArray(aTexCoordHandle)
     } catch (e: Exception) {
-      return
+      Log.w(TAG, "Error in onDrawFrame: ${e.message}")
     }
-
-    if (program == 0) return
-
-    GLES20.glUseProgram(program)
-    GLES20.glUniformMatrix4fv(uTexMatrixHandle, 1, false, texMatrix, 0)
-    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
-    GLES20.glUniform1i(uTextureHandle, 0)
-
-    GLES20.glEnableVertexAttribArray(aPositionHandle)
-    GLES20.glVertexAttribPointer(aPositionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
-
-    GLES20.glEnableVertexAttribArray(aTexCoordHandle)
-    GLES20.glVertexAttribPointer(aTexCoordHandle, 2, GLES20.GL_FLOAT, false, 0, texBuffer)
-
-    if (displayMode == DisplayMode.MR) {
-      val halfWidth = maxOf(viewWidth / 2, 1)
-      // 1. Left Eye (Left Camera Viewport)
-      GLES20.glViewport(0, 0, halfWidth, viewHeight)
-      GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-      // 2. Right Eye (Right Camera Viewport)
-      GLES20.glViewport(halfWidth, 0, halfWidth, viewHeight)
-      GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-    } else {
-      // Single Camera Viewport (AR Mode)
-      GLES20.glViewport(0, 0, viewWidth, viewHeight)
-      GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-    }
-
-    GLES20.glDisableVertexAttribArray(aPositionHandle)
-    GLES20.glDisableVertexAttribArray(aTexCoordHandle)
   }
 
   private fun createProgram(vertexSource: String, fragmentSource: String): Int {
@@ -262,20 +320,44 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
     return shader
   }
 
+  override fun onPause() {
+    try {
+      super.onPause()
+    } catch (e: Exception) {
+      Log.w(TAG, "Error pausing GLSurfaceView: ${e.message}")
+    }
+  }
+
+  override fun onResume() {
+    try {
+      super.onResume()
+    } catch (e: Exception) {
+      Log.w(TAG, "Error resuming GLSurfaceView: ${e.message}")
+    }
+  }
+
   fun release() {
-    queueEvent {
-      surfaceTexture?.release()
-      surfaceTexture = null
-      cameraSurface?.release()
-      cameraSurface = null
-      if (textureId != 0) {
-        GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)
-        textureId = 0
+    try {
+      queueEvent {
+        try {
+          surfaceTexture?.release()
+          surfaceTexture = null
+          cameraSurface?.release()
+          cameraSurface = null
+          if (textureId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)
+            textureId = 0
+          }
+          if (program != 0) {
+            GLES20.glDeleteProgram(program)
+            program = 0
+          }
+        } catch (e: Exception) {
+          Log.w(TAG, "Error releasing GL resources: ${e.message}")
+        }
       }
-      if (program != 0) {
-        GLES20.glDeleteProgram(program)
-        program = 0
-      }
+    } catch (e: Exception) {
+      Log.w(TAG, "queueEvent failed on release: ${e.message}")
     }
   }
 }

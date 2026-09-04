@@ -170,6 +170,10 @@ class FilamentEngineHolder(private val context: Context) {
   // User-controlled scale multiplier (Default 1.0 = 100% 1:1 Physical Metric Scale)
   var modelScale: Float = 1.0f
   var modelRotationDegrees: Float = 0f
+  var modelPitchDegrees: Float = 0f
+  var modelOffsetX: Float = 0f
+  var modelOffsetY: Float = 0f
+  var modelOffsetZ: Float = 0f
 
   // Model physical dimensions in meters
   var modelPhysicalWidthMeters: Float = 1.0f
@@ -213,7 +217,7 @@ class FilamentEngineHolder(private val context: Context) {
       camera = cam
       blendMode = View.BlendMode.TRANSLUCENT
       isPostProcessingEnabled = true
-      sampleCount = 4
+      sampleCount = 1
       antiAliasing = View.AntiAliasing.FXAA
     }
     view = v
@@ -238,17 +242,17 @@ class FilamentEngineHolder(private val context: Context) {
     val v = view ?: return
     when (profile) {
       RenderQualityProfile.ULTRA -> {
-        v.sampleCount = 4
+        v.sampleCount = 2
         v.antiAliasing = View.AntiAliasing.FXAA
         v.isPostProcessingEnabled = true
       }
       RenderQualityProfile.HIGH -> {
-        v.sampleCount = 4
+        v.sampleCount = 1
         v.antiAliasing = View.AntiAliasing.FXAA
         v.isPostProcessingEnabled = true
       }
       RenderQualityProfile.MEDIUM -> {
-        v.sampleCount = 2
+        v.sampleCount = 1
         v.antiAliasing = View.AntiAliasing.FXAA
         v.isPostProcessingEnabled = true
       }
@@ -283,8 +287,27 @@ class FilamentEngineHolder(private val context: Context) {
 
   fun onSurfaceCreated(surface: Surface) {
     val eng = engine ?: return
-    swapChain?.let { eng.destroySwapChain(it) }
-    swapChain = eng.createSwapChain(surface)
+    try {
+      swapChain?.let { eng.destroySwapChain(it) }
+      swapChain = if (surface.isValid) {
+        eng.createSwapChain(surface)
+      } else {
+        null
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Error creating swapchain: ${e.message}", e)
+      swapChain = null
+    }
+  }
+
+  fun onSurfaceDestroyed() {
+    val eng = engine ?: return
+    try {
+      swapChain?.let { eng.destroySwapChain(it) }
+    } catch (e: Exception) {
+      Log.w(TAG, "Error destroying swapchain: ${e.message}")
+    }
+    swapChain = null
   }
 
   fun onSurfaceResized(width: Int, height: Int) {
@@ -547,10 +570,19 @@ class FilamentEngineHolder(private val context: Context) {
       val anchor = exhibit.anchor
       if (anchor != null && anchor.trackingState == TrackingState.TRACKING) {
         anchor.pose.toMatrix(scratchModelMatrix, 0)
-        if (exhibit.customRotationDeg != 0f) {
-          Matrix.rotateM(scratchModelMatrix, 0, exhibit.customRotationDeg, 0f, 1f, 0f)
+        // User gesture translation: Right/Left (X), Up/Down (Y), Near/Far (Z)
+        Matrix.translateM(scratchModelMatrix, 0, modelOffsetX, modelOffsetY, modelOffsetZ)
+
+        // User gesture rotation: Yaw (Y) and Pitch (X)
+        val totalYaw = exhibit.customRotationDeg + modelRotationDegrees
+        if (totalYaw != 0f) {
+          Matrix.rotateM(scratchModelMatrix, 0, totalYaw, 0f, 1f, 0f)
         }
-        val scale = exhibit.customScale * modelScale
+        if (modelPitchDegrees != 0f) {
+          Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
+        }
+
+        val scale = (exhibit.customScale * modelScale).coerceIn(0.02f, 25.0f)
         Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
 
         val rootInst = tm.getInstance(exhibit.asset.root)
@@ -593,50 +625,54 @@ class FilamentEngineHolder(private val context: Context) {
     val cam = camera ?: return
     val sc = swapChain ?: return
 
-    if (!rend.beginFrame(sc, frameTimeNanos)) return
+    try {
+      if (!rend.beginFrame(sc, frameTimeNanos)) return
 
-    val halfWidth = maxOf(surfaceWidth / 2, 1)
-    val halfIpd = (ipdMeters / 2.0f).toDouble()
-    val aspect = halfWidth.toDouble() / maxOf(surfaceHeight.toDouble(), 1.0)
+      val halfWidth = maxOf(surfaceWidth / 2, 1)
+      val halfIpd = (ipdMeters / 2.0f).toDouble()
+      val aspect = halfWidth.toDouble() / maxOf(surfaceHeight.toDouble(), 1.0)
 
-    updateAssetAnimations(frameTimeNanos)
-    updateAllExhibitAnchorTransforms()
+      updateAssetAnimations(frameTimeNanos)
+      updateAllExhibitAnchorTransforms()
 
-    // 1. Left Eye (Left Camera Viewport)
-    v.viewport = Viewport(0, 0, halfWidth, surfaceHeight)
-    cam.setProjection(45.0, aspect, 0.05, 50.0, Camera.Fov.VERTICAL)
-    if (headPoseMatrix != null) {
-      System.arraycopy(headPoseMatrix, 0, scratchLeftEyeMatrix, 0, 16)
-      Matrix.translateM(scratchLeftEyeMatrix, 0, -halfIpd.toFloat(), 0f, 0f)
-      for (i in 0 until 16) scratchViewDouble[i] = scratchLeftEyeMatrix[i].toDouble()
-      cam.setModelMatrix(scratchViewDouble)
-    } else {
-      cam.lookAt(
-        -halfIpd, 0.0, orbitDistance.toDouble(),
-        0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0
-      )
+      // 1. Left Eye (Left Camera Viewport)
+      v.viewport = Viewport(0, 0, halfWidth, surfaceHeight)
+      cam.setProjection(45.0, aspect, 0.05, 50.0, Camera.Fov.VERTICAL)
+      if (headPoseMatrix != null) {
+        System.arraycopy(headPoseMatrix, 0, scratchLeftEyeMatrix, 0, 16)
+        Matrix.translateM(scratchLeftEyeMatrix, 0, -halfIpd.toFloat(), 0f, 0f)
+        for (i in 0 until 16) scratchViewDouble[i] = scratchLeftEyeMatrix[i].toDouble()
+        cam.setModelMatrix(scratchViewDouble)
+      } else {
+        cam.lookAt(
+          -halfIpd, 0.0, orbitDistance.toDouble(),
+          0.0, 0.0, 0.0,
+          0.0, 1.0, 0.0
+        )
+      }
+      rend.render(v)
+
+      // 2. Right Eye (Right Camera Viewport)
+      v.viewport = Viewport(halfWidth, 0, halfWidth, surfaceHeight)
+      cam.setProjection(45.0, aspect, 0.05, 50.0, Camera.Fov.VERTICAL)
+      if (headPoseMatrix != null) {
+        System.arraycopy(headPoseMatrix, 0, scratchRightEyeMatrix, 0, 16)
+        Matrix.translateM(scratchRightEyeMatrix, 0, halfIpd.toFloat(), 0f, 0f)
+        for (i in 0 until 16) scratchViewDouble[i] = scratchRightEyeMatrix[i].toDouble()
+        cam.setModelMatrix(scratchViewDouble)
+      } else {
+        cam.lookAt(
+          halfIpd, 0.0, orbitDistance.toDouble(),
+          0.0, 0.0, 0.0,
+          0.0, 1.0, 0.0
+        )
+      }
+      rend.render(v)
+
+      rend.endFrame()
+    } catch (e: Exception) {
+      Log.e(TAG, "Exception during renderStereoFrame: ${e.message}", e)
     }
-    rend.render(v)
-
-    // 2. Right Eye (Right Camera Viewport)
-    v.viewport = Viewport(halfWidth, 0, halfWidth, surfaceHeight)
-    cam.setProjection(45.0, aspect, 0.05, 50.0, Camera.Fov.VERTICAL)
-    if (headPoseMatrix != null) {
-      System.arraycopy(headPoseMatrix, 0, scratchRightEyeMatrix, 0, 16)
-      Matrix.translateM(scratchRightEyeMatrix, 0, halfIpd.toFloat(), 0f, 0f)
-      for (i in 0 until 16) scratchViewDouble[i] = scratchRightEyeMatrix[i].toDouble()
-      cam.setModelMatrix(scratchViewDouble)
-    } else {
-      cam.lookAt(
-        halfIpd, 0.0, orbitDistance.toDouble(),
-        0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0
-      )
-    }
-    rend.render(v)
-
-    rend.endFrame()
   }
 
   fun renderFrame(frameTimeNanos: Long) {
@@ -644,17 +680,21 @@ class FilamentEngineHolder(private val context: Context) {
     val v = view ?: return
     val sc = swapChain ?: return
 
-    if (!rend.beginFrame(sc, frameTimeNanos)) return
+    try {
+      if (!rend.beginFrame(sc, frameTimeNanos)) return
 
-    val scaledW = (surfaceWidth * dynamicResolutionScale).toInt()
-    val scaledH = (surfaceHeight * dynamicResolutionScale).toInt()
-    v.viewport = Viewport(0, 0, scaledW, scaledH)
+      val scaledW = (surfaceWidth * dynamicResolutionScale).toInt()
+      val scaledH = (surfaceHeight * dynamicResolutionScale).toInt()
+      v.viewport = Viewport(0, 0, scaledW, scaledH)
 
-    updateAssetAnimations(frameTimeNanos)
-    updateAllExhibitAnchorTransforms()
+      updateAssetAnimations(frameTimeNanos)
+      updateAllExhibitAnchorTransforms()
 
-    rend.render(v)
-    rend.endFrame()
+      rend.render(v)
+      rend.endFrame()
+    } catch (e: Exception) {
+      Log.e(TAG, "Exception during renderFrame: ${e.message}", e)
+    }
   }
 
   private var lastAnimTimeNanos = 0L
@@ -713,10 +753,51 @@ class FilamentEngineHolder(private val context: Context) {
     val rootInst = tm.getInstance(asset.root)
     if (rootInst != 0) {
       pose.toMatrix(scratchModelMatrix, 0)
+      Matrix.translateM(scratchModelMatrix, 0, modelOffsetX, modelOffsetY, modelOffsetZ)
       if (modelRotationDegrees != 0f) {
         Matrix.rotateM(scratchModelMatrix, 0, modelRotationDegrees, 0f, 1f, 0f)
       }
-      Matrix.scaleM(scratchModelMatrix, 0, modelScale, modelScale, modelScale)
+      if (modelPitchDegrees != 0f) {
+        Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
+      }
+      val scale = modelScale.coerceIn(0.02f, 25.0f)
+      Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
+      tm.setTransform(rootInst, scratchModelMatrix)
+    }
+  }
+
+  /**
+   * Positions and transforms unanchored models directly in the AR/MR camera frustum
+   * responsive to all finger gestures (translation, rotation, pitch, and scale).
+   */
+  fun updateUnanchoredPose(asset: FilamentAsset, cameraPos: FloatArray?, cameraForward: FloatArray?) {
+    val eng = engine ?: return
+    val tm = eng.transformManager
+    val rootInst = tm.getInstance(asset.root)
+    if (rootInst != 0) {
+      Matrix.setIdentityM(scratchModelMatrix, 0)
+      val cx = cameraPos?.getOrNull(0) ?: 0f
+      val cy = cameraPos?.getOrNull(1) ?: 0f
+      val cz = cameraPos?.getOrNull(2) ?: 0f
+      val fx = cameraForward?.getOrNull(0) ?: 0f
+      val fy = cameraForward?.getOrNull(1) ?: 0f
+      val fz = cameraForward?.getOrNull(2) ?: -1f
+
+      // Default 1.2 meters in front of camera + finger gestures offset
+      Matrix.translateM(
+        scratchModelMatrix, 0,
+        cx + fx * 1.2f + modelOffsetX,
+        cy + fy * 1.2f + modelOffsetY,
+        cz + fz * 1.2f + modelOffsetZ
+      )
+      if (modelRotationDegrees != 0f) {
+        Matrix.rotateM(scratchModelMatrix, 0, modelRotationDegrees, 0f, 1f, 0f)
+      }
+      if (modelPitchDegrees != 0f) {
+        Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
+      }
+      val scale = modelScale.coerceIn(0.02f, 25.0f)
+      Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
       tm.setTransform(rootInst, scratchModelMatrix)
     }
   }
@@ -728,7 +809,7 @@ class FilamentEngineHolder(private val context: Context) {
       v.antiAliasing = View.AntiAliasing.NONE
       Log.i(TAG, "Thermal Guard: Reduced MSAA to 1x and disabled FXAA.")
     } else {
-      v.sampleCount = 4
+      v.sampleCount = 1
       v.antiAliasing = View.AntiAliasing.FXAA
     }
   }
@@ -744,6 +825,10 @@ class FilamentEngineHolder(private val context: Context) {
   fun resetTransforms() {
     modelScale = 1.0f
     modelRotationDegrees = 0f
+    modelPitchDegrees = 0f
+    modelOffsetX = 0f
+    modelOffsetY = 0f
+    modelOffsetZ = 0f
     orbitPitch = 15.0f
     orbitYaw = 30.0f
     orbitDistance = 2.5f
@@ -783,20 +868,32 @@ class FilamentEngineHolder(private val context: Context) {
   fun destroy() {
     val eng = engine ?: return
 
-    clearAllExhibits()
-    destroyCurrentAsset()
-    materialProvider?.destroy()
-    assetLoader?.destroy()
-    resourceLoader?.destroy()
+    try {
+      clearAllExhibits()
+      destroyCurrentAsset()
+      materialProvider?.destroy()
+      materialProvider = null
+      assetLoader?.destroy()
+      assetLoader = null
+      resourceLoader?.destroy()
+      resourceLoader = null
 
-    swapChain?.let { eng.destroySwapChain(it) }
-    view?.let { eng.destroyView(it) }
-    scene?.let { eng.destroyScene(it) }
-    renderer?.let { eng.destroyRenderer(it) }
-    camera?.let { eng.destroyCameraComponent(it.entity) }
+      swapChain?.let { eng.destroySwapChain(it) }
+      swapChain = null
+      view?.let { eng.destroyView(it) }
+      view = null
+      scene?.let { eng.destroyScene(it) }
+      scene = null
+      renderer?.let { eng.destroyRenderer(it) }
+      renderer = null
+      camera?.let { eng.destroyCameraComponent(it.entity) }
+      camera = null
 
-    eng.destroy()
-    engine = null
-    Log.i(TAG, "Filament Engine destroyed cleanly.")
+      eng.destroy()
+      engine = null
+      Log.i(TAG, "Filament Engine destroyed cleanly.")
+    } catch (e: Exception) {
+      Log.e(TAG, "Error during Filament destroy: ${e.message}", e)
+    }
   }
 }
