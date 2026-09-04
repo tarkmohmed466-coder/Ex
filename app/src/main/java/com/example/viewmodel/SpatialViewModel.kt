@@ -366,6 +366,9 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         dominantSemanticLabel = trackingData.semanticsTelemetry.dominantLabel,
         depthConfidenceScore = depthManager?.depthConfidenceScore ?: it.depthConfidenceScore,
         deviceTier = trackingData.certification?.certificationTier ?: it.deviceTier,
+        arRecordingStatus = trackingData.recordingTelemetry.recordingStatus,
+        environmentalMeshTriangles = trackingData.reconstructionTelemetry.totalTriangles,
+        environmentalMeshAreaSqM = trackingData.reconstructionTelemetry.totalSurfaceAreaSqMeters,
         metricDimensions = modelDimensions
       )
     }

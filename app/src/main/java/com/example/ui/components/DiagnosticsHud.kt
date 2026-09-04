@@ -151,6 +151,25 @@ fun DiagnosticsHud(
           color = Color(0xFF34D399)
         )
       }
+
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth()
+      ) {
+        Text(
+          text = "Rec: ${telemetry.arRecordingStatus} | Cloud Anchors: ${telemetry.cloudAnchorsCount}",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = if (telemetry.arRecordingStatus == "RECORDING") Color(0xFFEF4444) else Color(0xFF94A3B8)
+        )
+        Text(
+          text = "Mesh: ${telemetry.environmentalMeshTriangles} tris (${"%.1f".format(telemetry.environmentalMeshAreaSqM)}m²)",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = Color(0xFFA78BFA)
+        )
+      }
     }
   }
 }

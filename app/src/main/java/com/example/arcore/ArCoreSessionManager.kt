@@ -85,6 +85,8 @@ data class ArCoreTrackingData(
   val geospatialStatus: GeospatialStatus = GeospatialStatus(),
   val semanticsTelemetry: SemanticsTelemetry = SemanticsTelemetry(),
   val cloudAnchorsCount: Int = 0,
+  val recordingTelemetry: RecordingTelemetry = RecordingTelemetry(),
+  val reconstructionTelemetry: ReconstructionTelemetry = ReconstructionTelemetry(),
   val certification: DeviceCapabilityCertification? = null,
   val detectedPlanes: List<DetectedPlaneInfo> = emptyList(),
   val detectedImages: List<DetectedImageInfo> = emptyList()
@@ -118,8 +120,10 @@ class ArCoreSessionManager(private val context: Context) {
   // Specialized ARCore Sub-Managers
   val geospatialManager = ArCoreGeospatialManager()
   val semanticsManager = SceneSemanticsManager()
-  val cloudAnchorManager = CloudAnchorManager()
+  val cloudAnchorManager = CloudAnchorManager(context)
   val facesManager = AugmentedFacesManager()
+  val recordingPlaybackManager = ArCoreRecordingPlaybackManager(context)
+  val environmentalMeshManager = EnvironmentalMeshManager()
   var deviceCertification: DeviceCapabilityCertification? = null
     private set
 
@@ -559,10 +563,12 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
 
-      // Process Geospatial, Scene Semantics & Face tracking
+      // Process Geospatial, Scene Semantics, Face tracking, Recording & Reconstruction
       geospatialManager.updateGeospatialState(currentSession)
       semanticsManager.processFrameSemantics(frame)
       facesManager.processFrameFaces(currentSession)
+      recordingPlaybackManager.updateFrameState(currentSession)
+      environmentalMeshManager.updateEnvironmentalMesh(currentSession)
 
       val trackingData = ArCoreTrackingData(
         trackingState = camera.trackingState,
@@ -582,6 +588,8 @@ class ArCoreSessionManager(private val context: Context) {
         geospatialStatus = geospatialManager.status,
         semanticsTelemetry = semanticsManager.telemetry,
         cloudAnchorsCount = cloudAnchorManager.cloudAnchorsCount,
+        recordingTelemetry = recordingPlaybackManager.telemetry,
+        reconstructionTelemetry = environmentalMeshManager.telemetry,
         certification = deviceCertification,
         detectedPlanes = scratchPlaneList,
         detectedImages = scratchImageList

@@ -34,6 +34,9 @@ data class TelemetryState(
   val dominantSemanticLabel: String = "SCANNING",
   val depthConfidenceScore: Float = 95f,
   val deviceTier: String = "TIER_A_FLAGSHIP",
+  val arRecordingStatus: String = "STOPPED",
+  val environmentalMeshTriangles: Int = 0,
+  val environmentalMeshAreaSqM: Float = 0f,
   val logs: List<LogEntry> = emptyList()
 )
 

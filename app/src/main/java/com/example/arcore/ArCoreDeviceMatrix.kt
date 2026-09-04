@@ -99,19 +99,41 @@ object ArCoreDeviceMatrix {
       } catch (_: Throwable) { false }
     } ?: isTierA
 
+    val instantPlacementSupported = session?.let {
+      try {
+        val testConfig = it.config
+        testConfig.instantPlacementMode = Config.InstantPlacementMode.LOCAL_Y_UP
+        it.isSupported(testConfig)
+      } catch (_: Throwable) {
+        // Fallback check: modern flagships support instant placement
+        isTierA || isTierB
+      }
+    } ?: (isTierA || isTierB)
+
+    // Check front camera support for 3D Face Mesh tracking
+    val facesSupported = session?.let {
+      try {
+        val filter = com.google.ar.core.CameraConfigFilter(it)
+          .setFacingDirection(com.google.ar.core.CameraConfig.FacingDirection.FRONT)
+        it.getSupportedCameraConfigs(filter).isNotEmpty()
+      } catch (_: Throwable) { false }
+    } ?: false
+
+    val cloudAnchorsSupported = (session != null) && (isTierA || isTierB)
+
     val certification = DeviceCapabilityCertification(
       deviceModel = model,
       manufacturer = manufacturer,
-      isCertifiedArCoreDevice = true,
+      isCertifiedArCoreDevice = isTierA || isTierB || session != null,
       certificationTier = tier,
       supportsDepthApi = depthSupported,
       supportsRawDepth = rawDepthSupported,
-      supportsInstantPlacement = true, // Universal on ARCore 1.20+
+      supportsInstantPlacement = instantPlacementSupported,
       supportsGeospatialVps = geospatialSupported,
       supportsSceneSemantics = semanticsSupported,
-      supportsAugmentedFaces = true, // Universal ARCore camera pipeline
+      supportsAugmentedFaces = facesSupported,
       supportsStreetscapeGeometry = streetscapeSupported,
-      supportsCloudAnchors = true, // Universal ARCore Cloud Anchors
+      supportsCloudAnchors = cloudAnchorsSupported,
       recommendedQualityTier = if (isTierA) "HIGH_FIDELITY_ULTRA" else "BALANCED"
     )
 
