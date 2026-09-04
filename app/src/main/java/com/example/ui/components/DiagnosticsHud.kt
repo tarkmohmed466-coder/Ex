@@ -132,6 +132,25 @@ fun DiagnosticsHud(
           color = Color(0xFFFBBF24)
         )
       }
+
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth()
+      ) {
+        Text(
+          text = "Semantics: ${telemetry.dominantSemanticLabel} | VPS: ${if (telemetry.isGeospatialActive) "Active" else "Local 6DoF"}",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = Color(0xFF38BDF8)
+        )
+        Text(
+          text = "Conf: ${telemetry.depthConfidenceScore.toInt()}% | ${telemetry.deviceTier.substringAfter("TIER_")}",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = Color(0xFF34D399)
+        )
+      }
     }
   }
 }

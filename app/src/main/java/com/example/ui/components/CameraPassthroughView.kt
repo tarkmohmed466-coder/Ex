@@ -64,10 +64,30 @@ fun CameraPassthroughView(
 
   val isCameraRequired = (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) && hasCameraPermission
 
+  // When returning to Object Mode, guarantee any active camera provider is completely unbound
+  LaunchedEffect(displayMode) {
+    if (displayMode == DisplayMode.OBJECT) {
+      try {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        val executor = ContextCompat.getMainExecutor(context)
+        cameraProviderFuture.addListener({
+          try {
+            cameraProviderFuture.get().unbindAll()
+            Log.i("CameraPassthroughView", "Camera provider unbound successfully for Object Mode studio canvas.")
+          } catch (e: Exception) {
+            Log.w("CameraPassthroughView", "Error unbinding CameraX in Object Mode: ${e.message}")
+          }
+        }, executor)
+      } catch (e: Exception) {
+        Log.w("CameraPassthroughView", "Failed to access camera provider for unbind: ${e.message}")
+      }
+    }
+  }
+
   Box(
     modifier = modifier
       .fillMaxSize()
-      .background(Color(0xFF0B0F19))
+      .background(Color(0xFF070B14))
       .testTag("camerax_preview_view")
   ) {
     // 1. Dual Camera Viewport - active and mounted ONLY in AR/MR modes with permission granted

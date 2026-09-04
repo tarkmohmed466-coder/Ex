@@ -10,6 +10,7 @@ import com.example.engine.HardwareCapabilities
 import com.example.engine.HardwareCapabilityDetector
 import com.example.engine.RenderQualityProfile
 import com.example.engine.SpatialLodManager
+import com.example.model.DisplayMode
 import com.google.android.filament.Camera
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
@@ -243,7 +244,33 @@ class FilamentEngineHolder(private val context: Context) {
     val caps = HardwareCapabilityDetector.detect(context)
     applyQualityProfile(caps.suggestedProfile)
 
+    // Configure initial display mode (Object Mode with solid dark studio canvas)
+    setDisplayMode(DisplayMode.OBJECT)
+
     Log.i(TAG, "Filament Engine, Renderer, Scene, View & gltfio initialized successfully.")
+  }
+
+  fun setDisplayMode(mode: DisplayMode) {
+    val rend = renderer ?: return
+    val v = view ?: return
+    when (mode) {
+      DisplayMode.OBJECT -> {
+        // Solid dark studio brush canvas: 100% opaque, no camera feed or background leakage
+        v.blendMode = View.BlendMode.OPAQUE
+        rend.clearOptions = Renderer.ClearOptions().apply {
+          clear = true
+          clearColor = floatArrayOf(0.04f, 0.055f, 0.086f, 1.0f)
+        }
+      }
+      DisplayMode.AR, DisplayMode.MR -> {
+        // Translucent viewport to allow real-time camera passthrough underneath
+        v.blendMode = View.BlendMode.TRANSLUCENT
+        rend.clearOptions = Renderer.ClearOptions().apply {
+          clear = true
+          clearColor = floatArrayOf(0.0f, 0.0f, 0.0f, 0.0f)
+        }
+      }
+    }
   }
 
   fun applyQualityProfile(profile: RenderQualityProfile) {

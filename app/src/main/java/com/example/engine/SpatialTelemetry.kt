@@ -26,6 +26,14 @@ data class TelemetryState(
   val currentAnimationTrack: Int = 0,
   val totalAnimationTracks: Int = 1,
   val thermalStatus: String = "Nominal (Safe)",
+  val isInstantPlacementActive: Boolean = true,
+  val isGeospatialActive: Boolean = false,
+  val earthTrackingState: String = "IDLE",
+  val earthCoordinates: String = "0.000000°, 0.000000°",
+  val cloudAnchorsCount: Int = 0,
+  val dominantSemanticLabel: String = "SCANNING",
+  val depthConfidenceScore: Float = 95f,
+  val deviceTier: String = "TIER_A_FLAGSHIP",
   val logs: List<LogEntry> = emptyList()
 )
 

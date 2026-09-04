@@ -130,12 +130,6 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
 
   fun setDisplayMode(mode: DisplayMode) {
     _displayMode.value = mode
-    val modeName = when (mode) {
-      DisplayMode.MR -> "MR Native Stereo Mode Activated"
-      DisplayMode.AR -> "AR 6DoF Image & Plane Tracking Activated"
-      DisplayMode.OBJECT -> "3D Filament Studio Activated"
-    }
-    emitToast(modeName)
     log("DISPLAY", "Switched display pipeline to: $mode")
   }
 
@@ -150,7 +144,6 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         triangleCount = model.triangleCount
       )
     }
-    emitToast("Loaded: ${model.title}")
     log("FILAMENT_GLTF", "Instantiated 1:1 Metric glTF model: ${model.title}")
   }
 
@@ -213,14 +206,12 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     } else {
       "📍 Plane Anchor Placed: $modelTitle"
     }
-    emitToast(msg)
     log("SPATIAL_ANCHOR", "Pinned $modelTitle via $source at (%.2f, %.2f, %.2f)".format(worldPos[0], worldPos[1], worldPos[2]))
   }
 
   fun removeAnchor(anchorId: String) {
     _arAnchors.update { it.filterNot { a -> a.id == anchorId } }
     _telemetry.update { it.copy(activeAnchorsCount = _arAnchors.value.size) }
-    emitToast("Exhibit Anchor Removed")
     log("SPATIAL_ANCHOR", "Removed anchor: $anchorId")
   }
 
@@ -279,7 +270,6 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         metricDimensions = "None (Scene Cleared)"
       )
     }
-    emitToast("Model and Scene Cleared")
     log("SCENE", "Active model and all spatial anchors cleared from scene")
   }
 
@@ -362,6 +352,20 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         depthAvgMeters = depthManager?.averageDepthMeters ?: it.depthAvgMeters,
         depthOcclusionDetected = depthManager?.isOcclusionDetected ?: false,
         occlusionPercentage = depthManager?.occlusionPercentage ?: 0f,
+        isInstantPlacementActive = trackingData.isInstantPlacementEnabled,
+        isGeospatialActive = trackingData.geospatialStatus.isSupported,
+        earthTrackingState = "${trackingData.geospatialStatus.earthState} (${trackingData.geospatialStatus.trackingState})",
+        earthCoordinates = if (trackingData.geospatialStatus.latitude != 0.0) {
+          "%.5f°, %.5f° (±%.1fm)".format(
+            trackingData.geospatialStatus.latitude,
+            trackingData.geospatialStatus.longitude,
+            trackingData.geospatialStatus.horizontalAccuracyMeters
+          )
+        } else "0.000000°, 0.000000°",
+        cloudAnchorsCount = trackingData.cloudAnchorsCount,
+        dominantSemanticLabel = trackingData.semanticsTelemetry.dominantLabel,
+        depthConfidenceScore = depthManager?.depthConfidenceScore ?: it.depthConfidenceScore,
+        deviceTier = trackingData.certification?.certificationTier ?: it.deviceTier,
         metricDimensions = modelDimensions
       )
     }

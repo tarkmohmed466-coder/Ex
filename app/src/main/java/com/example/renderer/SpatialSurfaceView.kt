@@ -294,13 +294,17 @@ class SpatialSurfaceView @JvmOverloads constructor(
   }
 
   private fun updateModeConfiguration() {
+    filamentEngine.setDisplayMode(displayMode)
     when (displayMode) {
       DisplayMode.OBJECT -> {
         sensorsManager.stop()
         arCoreSessionManager.pauseSession()
+        dualCameraGLSurfaceView?.displayMode = DisplayMode.OBJECT
+        dualCameraGLSurfaceView?.detachCamera()
       }
       DisplayMode.AR, DisplayMode.MR -> {
         sensorsManager.start()
+        dualCameraGLSurfaceView?.displayMode = displayMode
         if (arCoreSessionManager.isArCorePackageInstalled()) {
           try {
             (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }

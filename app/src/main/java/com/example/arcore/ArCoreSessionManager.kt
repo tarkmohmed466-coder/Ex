@@ -81,6 +81,11 @@ data class ArCoreTrackingData(
   val walkingDisplacementMeters: Float = 0f,
   val isDepthSupported: Boolean = false,
   val isDepthEnabled: Boolean = false,
+  val isInstantPlacementEnabled: Boolean = true,
+  val geospatialStatus: GeospatialStatus = GeospatialStatus(),
+  val semanticsTelemetry: SemanticsTelemetry = SemanticsTelemetry(),
+  val cloudAnchorsCount: Int = 0,
+  val certification: DeviceCapabilityCertification? = null,
   val detectedPlanes: List<DetectedPlaneInfo> = emptyList(),
   val detectedImages: List<DetectedImageInfo> = emptyList()
 )
@@ -101,6 +106,7 @@ data class DetectedPlaneInfo(
  * - Zero allocations in frame update loop.
  * - Manages real ARCore camera background texture lifecycle (setCameraTextureName).
  * - Environmental HDR light estimation & depth sensor integration.
+ * - Instant Placement, Geospatial VPS, Scene Semantics, Cloud Anchors & Augmented Faces.
  */
 class ArCoreSessionManager(private val context: Context) {
 
@@ -108,6 +114,14 @@ class ArCoreSessionManager(private val context: Context) {
     private const val TAG = "ArCoreSessionManager"
     private const val TRACKING_LOSS_GRACE_PERIOD_MS = 4000L
   }
+
+  // Specialized ARCore Sub-Managers
+  val geospatialManager = ArCoreGeospatialManager()
+  val semanticsManager = SceneSemanticsManager()
+  val cloudAnchorManager = CloudAnchorManager()
+  val facesManager = AugmentedFacesManager()
+  var deviceCertification: DeviceCapabilityCertification? = null
+    private set
 
   var session: Session? = null
     private set
@@ -255,6 +269,23 @@ class ArCoreSessionManager(private val context: Context) {
             config.augmentedImageDatabase = imageDatabase
             Log.i(TAG, "Augmented Image Database configured with ${imageDatabase.numImages} targets.")
           }
+
+          // Enable Instant Placement Mode (Local Y Up)
+          try {
+            config.instantPlacementMode = Config.InstantPlacementMode.LOCAL_Y_UP
+            Log.i(TAG, "ARCore Instant Placement Mode enabled.")
+          } catch (e: Throwable) {
+            Log.d(TAG, "Instant placement not supported on this version: ${e.message}")
+          }
+
+          // Configure Geospatial API & Streetscape Geometry
+          geospatialManager.configureGeospatialMode(newSession, config)
+
+          // Configure Scene Semantics Mode
+          semanticsManager.configureSemanticsMode(newSession, config)
+
+          // Certify hardware against ARCore capability matrix
+          deviceCertification = ArCoreDeviceMatrix.certifyDevice(context, newSession)
 
           // Real-time 60fps focus mode
           config.focusMode = Config.FocusMode.AUTO
@@ -528,6 +559,11 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
 
+      // Process Geospatial, Scene Semantics & Face tracking
+      geospatialManager.updateGeospatialState(currentSession)
+      semanticsManager.processFrameSemantics(frame)
+      facesManager.processFrameFaces(currentSession)
+
       val trackingData = ArCoreTrackingData(
         trackingState = camera.trackingState,
         trackingFailureReason = camera.trackingFailureReason,
@@ -542,6 +578,11 @@ class ArCoreSessionManager(private val context: Context) {
         walkingDisplacementMeters = totalWalkingDisplacement,
         isDepthSupported = currentSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC),
         isDepthEnabled = currentSession.config.depthMode == Config.DepthMode.AUTOMATIC,
+        isInstantPlacementEnabled = true,
+        geospatialStatus = geospatialManager.status,
+        semanticsTelemetry = semanticsManager.telemetry,
+        cloudAnchorsCount = cloudAnchorManager.cloudAnchorsCount,
+        certification = deviceCertification,
         detectedPlanes = scratchPlaneList,
         detectedImages = scratchImageList
       )
@@ -561,15 +602,22 @@ class ArCoreSessionManager(private val context: Context) {
   }
 
   /**
-   * Performs hit test against detected physical planes with polygon bounds check.
+   * Performs hit test against detected physical planes with polygon bounds check,
+   * falling back to ARCore Instant Placement points if planes are still forming.
    */
   fun hitTest(frame: Frame, xPx: Float, yPx: Float): HitResult? {
     val hits = frame.hitTest(xPx, yPx)
+    // 1. Try detected plane with polygon bounds
     for (hit in hits) {
       val trackable = hit.trackable
       if (trackable is Plane && trackable.isPoseInPolygon(hit.hitPose) && trackable.trackingState == TrackingState.TRACKING) {
         return hit
       }
+    }
+    // 2. Try InstantPlacementPoint for instant zero-latency pinning
+    val instantHit = hits.firstOrNull { it.trackable is com.google.ar.core.InstantPlacementPoint }
+    if (instantHit != null) {
+      return instantHit
     }
     return hits.firstOrNull()
   }

@@ -63,6 +63,8 @@ class DepthOcclusionManager {
     private set
   var maxDepthMeters: Float = 0f
     private set
+  var depthConfidenceScore: Float = 95f
+    private set
 
   /**
    * Initializes the OpenGL 2D texture used to feed depth data to GPU shaders.
@@ -176,6 +178,11 @@ class DepthOcclusionManager {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
         isDepthTextureReady = true
       }
+
+      // Compute depth confidence score
+      val totalExpected = width * height
+      val coveragePct = if (totalExpected > 0) (validCount.toFloat() / totalExpected) * 100f else 0f
+      depthConfidenceScore = (coveragePct * 0.4f + 60f).coerceIn(40f, 99f)
 
       // Per-pixel occlusion validation for virtual anchors
       var occludedCount = 0

@@ -64,9 +64,7 @@ import com.example.ui.components.CameraPassthroughView
 import com.example.ui.components.DiagnosticsHud
 import com.example.ui.components.ExhibitMarkerGuideSheet
 import com.example.ui.components.ModelSelectorSheet
-import com.example.ui.components.NearbyExhibitOverlay
 import com.example.ui.components.SettingsSheet
-import com.example.ui.components.StereoCameraOverlay
 import com.example.ui.components.TopModePill
 import com.example.ui.theme.MyApplicationTheme
 import com.example.viewmodel.SpatialViewModel
@@ -301,73 +299,7 @@ fun MixedRealityScreen(
       }
     }
 
-    // 3. Proximity & Walking Exhibit Overlay (in AR / MR Modes)
-    if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
-      Box(
-        modifier = Modifier
-          .fillMaxWidth()
-          .statusBarsPadding()
-          .padding(top = if (showDiagnostics) 180.dp else 70.dp, start = 16.dp, end = 16.dp)
-          .align(Alignment.TopCenter)
-      ) {
-        NearbyExhibitOverlay(
-          nearbyExhibit = nearbyExhibit,
-          activeAnchorsCount = arAnchors.size,
-          walkingMeters = telemetry.walkingDisplacementMeters
-        )
-      }
-    }
-
-    // 4. Stereoscopic Dual Camera Viewport Overlay in MR Mode
-    if (displayMode == DisplayMode.MR) {
-      StereoCameraOverlay(ipdMm = 64f)
-    }
-
-    // 5. Empty State Hint (When Scene is Cleared)
-    if (selectedModel == null && arAnchors.isEmpty()) {
-      Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-          .align(Alignment.Center)
-          .padding(horizontal = 32.dp)
-          .testTag("empty_scene_card")
-      ) {
-        androidx.compose.material3.Surface(
-          shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
-          color = Color(0xFF0F172A).copy(alpha = 0.88f),
-          border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155)),
-          modifier = Modifier.padding(16.dp)
-        ) {
-          androidx.compose.foundation.layout.Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp)
-          ) {
-            Icon(
-              imageVector = Icons.Default.ViewInAr,
-              contentDescription = null,
-              tint = Color(0xFF38BDF8),
-              modifier = Modifier.size(36.dp)
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            androidx.compose.material3.Text(
-              text = "Scene is Empty",
-              color = Color.White,
-              fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-              fontSize = 17.sp
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            androidx.compose.material3.Text(
-              text = "Tap 'Open' below to load a 3D exhibit.",
-              color = Color(0xFF94A3B8),
-              fontSize = 13.sp,
-              textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-          }
-        }
-      }
-    }
-
-    // 6. Shutter Snapshot Flash Overlay
+    // 3. Shutter Snapshot Flash Overlay
     if (flashAnim.value > 0.01f) {
       Box(
         modifier = Modifier
