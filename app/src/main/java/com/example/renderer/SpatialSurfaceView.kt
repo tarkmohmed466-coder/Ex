@@ -3,6 +3,7 @@ package com.example.renderer
 import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
@@ -20,6 +21,7 @@ import com.example.arcore.ExhibitMarker
 import com.example.arcore.ExhibitSource
 import com.example.arcore.ImageMarkerCatalog
 import com.example.engine.DiagnosticsLogger
+import com.example.engine.SensorsManager
 import com.example.engine.TwoFingerRotateDetector
 import com.example.model.DisplayMode
 import com.example.parser.GltfAssetFactory
@@ -106,8 +108,20 @@ class SpatialSurfaceView @JvmOverloads constructor(
   private val scratchHeadPoseMatrix = FloatArray(16)
   private val scratchAnchorPoses = mutableListOf<Pose>()
 
+  private var sensorPitch = 0f
+  private var sensorRoll = 0f
+  private var sensorYaw = 0f
+
+  private val sensorsManager = SensorsManager(context) { pitch, roll, yaw ->
+    sensorPitch = pitch
+    sensorRoll = roll
+    sensorYaw = yaw
+  }
+
   init {
     holder.addCallback(this)
+    holder.setFormat(PixelFormat.TRANSLUCENT)
+    setZOrderMediaOverlay(true)
 
     filamentEngine.initialize()
 
@@ -190,13 +204,19 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
   fun resume(activity: Activity) {
     if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
-      arCoreSessionManager.resumeSession(activity)
+      sensorsManager.start()
+      try {
+        arCoreSessionManager.resumeSession(activity)
+      } catch (e: Exception) {
+        Log.w(TAG, "ARCore resume skipped: ${e.message}")
+      }
     }
     startRendering()
   }
 
   fun pause() {
     stopRendering()
+    sensorsManager.stop()
     arCoreSessionManager.pauseSession()
   }
 
@@ -242,10 +262,16 @@ class SpatialSurfaceView @JvmOverloads constructor(
   private fun updateModeConfiguration() {
     when (displayMode) {
       DisplayMode.OBJECT -> {
+        sensorsManager.stop()
         arCoreSessionManager.pauseSession()
       }
       DisplayMode.AR, DisplayMode.MR -> {
-        (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }
+        sensorsManager.start()
+        try {
+          (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }
+        } catch (e: Exception) {
+          Log.w(TAG, "ARCore resume skipped: ${e.message}")
+        }
       }
     }
   }
@@ -276,7 +302,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
       }
 
       DisplayMode.AR -> {
-        val frame = arCoreSessionManager.updateFrame()
+        val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
         if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
           frame.camera.getProjectionMatrix(scratchProjMatrix, 0, 0.05f, 50.0f)
           frame.camera.getViewMatrix(scratchViewMatrix, 0)
@@ -319,12 +345,15 @@ class SpatialSurfaceView @JvmOverloads constructor(
               filamentEngine.updateAnchorPose(currentAsset, primaryAnchor.pose)
             }
           }
+        } else {
+          // Robust AR Camera with Device Orientation
+          filamentEngine.updateArCamera(sensorPitch, sensorYaw, sensorRoll)
         }
         filamentEngine.renderFrame(frameTimeNanos)
       }
 
       DisplayMode.MR -> {
-        val frame = arCoreSessionManager.updateFrame()
+        val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
         val hasValidTracking = frame != null && frame.camera.trackingState == TrackingState.TRACKING
         if (hasValidTracking) {
           frame!!.camera.getViewMatrix(scratchHeadPoseMatrix, 0)

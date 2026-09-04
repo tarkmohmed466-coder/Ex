@@ -60,12 +60,13 @@ import com.example.model.DisplayMode
 import com.example.renderer.SpatialSurfaceView
 import com.example.ui.components.AnimationControlBar
 import com.example.ui.components.BottomActionPill
+import com.example.ui.components.CameraPassthroughView
 import com.example.ui.components.DiagnosticsHud
 import com.example.ui.components.ExhibitMarkerGuideSheet
 import com.example.ui.components.ModelSelectorSheet
 import com.example.ui.components.NearbyExhibitOverlay
-import com.example.ui.components.ObjectZoomInspectWidget
 import com.example.ui.components.SettingsSheet
+import com.example.ui.components.StereoCameraOverlay
 import com.example.ui.components.TopModePill
 import com.example.ui.theme.MyApplicationTheme
 import com.example.viewmodel.SpatialViewModel
@@ -262,6 +263,16 @@ fun MixedRealityScreen(
       .fillMaxSize()
       .background(Color.Black)
   ) {
+    // 0. Live Hardware Camera Passthrough (AR & MR modes)
+    CameraPassthroughView(
+      displayMode = displayMode,
+      hasCameraPermission = hasCameraPermission,
+      onRequestPermission = {
+        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+      },
+      modifier = Modifier.fillMaxSize()
+    )
+
     // 1. Unified Google Filament + ARCore SurfaceView Canvas
     AndroidView(
       factory = { spatialSurfaceView },
@@ -270,8 +281,8 @@ fun MixedRealityScreen(
         .testTag("spatial_filament_canvas")
     )
 
-    // 2. Diagnostics HUD Overlay (When enabled or in AR tracking)
-    if (showDiagnostics || displayMode == DisplayMode.AR) {
+    // 2. Diagnostics HUD Overlay (When explicitly enabled via settings)
+    if (showDiagnostics) {
       Box(
         modifier = Modifier
           .fillMaxWidth()
@@ -289,7 +300,7 @@ fun MixedRealityScreen(
         modifier = Modifier
           .fillMaxWidth()
           .statusBarsPadding()
-          .padding(top = if (showDiagnostics || displayMode == DisplayMode.AR) 180.dp else 70.dp, start = 16.dp, end = 16.dp)
+          .padding(top = if (showDiagnostics) 180.dp else 70.dp, start = 16.dp, end = 16.dp)
           .align(Alignment.TopCenter)
       ) {
         NearbyExhibitOverlay(
@@ -300,7 +311,12 @@ fun MixedRealityScreen(
       }
     }
 
-    // 4. Empty State Hint (When Scene is Cleared)
+    // 4. Stereoscopic Dual Camera Viewport Overlay in MR Mode
+    if (displayMode == DisplayMode.MR) {
+      StereoCameraOverlay(ipdMm = 64f)
+    }
+
+    // 5. Empty State Hint (When Scene is Cleared)
     if (selectedModel == null && arAnchors.isEmpty()) {
       Box(
         contentAlignment = Alignment.Center,
@@ -334,7 +350,7 @@ fun MixedRealityScreen(
             )
             Spacer(modifier = Modifier.height(4.dp))
             androidx.compose.material3.Text(
-              text = "Tap 'Open' or the 3D Model icon above to load an exhibit.",
+              text = "Tap 'Open' below to load a 3D exhibit.",
               color = Color(0xFF94A3B8),
               fontSize = 13.sp,
               textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -344,7 +360,7 @@ fun MixedRealityScreen(
       }
     }
 
-    // 5. Shutter Snapshot Flash Overlay
+    // 6. Shutter Snapshot Flash Overlay
     if (flashAnim.value > 0.01f) {
       Box(
         modifier = Modifier
@@ -353,34 +369,15 @@ fun MixedRealityScreen(
       )
     }
 
-    // 5. TOP CONTROLS: Mode Switcher Pill with Quick Access buttons
-    Row(
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.SpaceBetween,
+    // 7. TOP CONTROLS: Mode Switcher Pill centered (MR | AR | Object)
+    Box(
+      contentAlignment = Alignment.Center,
       modifier = Modifier
         .fillMaxWidth()
         .statusBarsPadding()
-        .padding(top = 12.dp, start = 16.dp, end = 16.dp)
+        .padding(top = 12.dp)
         .align(Alignment.TopCenter)
     ) {
-      // Settings Button
-      IconButton(
-        onClick = {
-          hapticManager.performClick()
-          viewModel.setShowSettings(true)
-        },
-        modifier = Modifier
-          .clip(CircleShape)
-          .background(Color(0xFF0F172A).copy(alpha = 0.85f))
-          .testTag("settings_button")
-      ) {
-        Icon(
-          imageVector = Icons.Default.Settings,
-          contentDescription = "Settings",
-          tint = Color.White
-        )
-      }
-
       TopModePill(
         currentMode = displayMode,
         onModeSelected = { newMode ->
@@ -388,114 +385,6 @@ fun MixedRealityScreen(
           viewModel.setDisplayMode(newMode)
         }
       )
-
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        // Image Marker Guide Target Button
-        IconButton(
-          onClick = {
-            hapticManager.performClick()
-            viewModel.setShowMarkerGuide(true)
-          },
-          modifier = Modifier
-            .clip(CircleShape)
-            .background(Color(0xFF0F172A).copy(alpha = 0.85f))
-            .testTag("marker_guide_button")
-        ) {
-          Icon(
-            imageVector = Icons.Default.QrCodeScanner,
-            contentDescription = "Exhibit Markers",
-            tint = Color(0xFFFBBF24)
-          )
-        }
-
-        // Model Selector Button
-        IconButton(
-          onClick = {
-            hapticManager.performClick()
-            viewModel.setShowModelSelector(true)
-          },
-          modifier = Modifier
-            .clip(CircleShape)
-            .background(Color(0xFF0F172A).copy(alpha = 0.85f))
-            .testTag("models_button")
-        ) {
-          Icon(
-            imageVector = Icons.Default.ViewInAr,
-            contentDescription = "Models",
-            tint = Color(0xFF38BDF8)
-          )
-        }
-      }
-    }
-
-    // 6. Object Mode Floating Zoom & Inspect Controls (+ / - / Reset / Auto-Rotate / Grid)
-    if (displayMode == DisplayMode.OBJECT && selectedModel != null) {
-      val cameraDist = spatialSurfaceView.filamentEngine.orbitDistance
-      val zoomPercent = ((2.5f / cameraDist) * 100).toInt().coerceIn(25, 400)
-
-      Box(
-        modifier = Modifier
-          .align(Alignment.CenterEnd)
-          .padding(end = 16.dp)
-      ) {
-        ObjectZoomInspectWidget(
-          zoomPercentage = zoomPercent,
-          isAutoRotating = autoRotate,
-          isGridVisible = showGridFloor,
-          onZoomIn = {
-            hapticManager.performClick()
-            spatialSurfaceView.filamentEngine.zoomIn()
-          },
-          onZoomOut = {
-            hapticManager.performClick()
-            spatialSurfaceView.filamentEngine.zoomOut()
-          },
-          onResetView = {
-            hapticManager.performClick()
-            spatialSurfaceView.filamentEngine.resetTransforms()
-          },
-          onToggleAutoRotate = {
-            hapticManager.performClick()
-            viewModel.setAutoRotate(!autoRotate)
-          },
-          onToggleGrid = {
-            hapticManager.performClick()
-            viewModel.setShowGridFloor(!showGridFloor)
-          }
-        )
-      }
-    }
-
-    // 7. Animation Controls (Floating above bottom pill in Object mode)
-    if (displayMode == DisplayMode.OBJECT && (selectedModel?.hasAnimations == true)) {
-      Box(
-        contentAlignment = Alignment.BottomCenter,
-        modifier = Modifier
-          .fillMaxWidth()
-          .align(Alignment.BottomCenter)
-          .navigationBarsPadding()
-          .padding(bottom = 100.dp, start = 20.dp, end = 20.dp)
-      ) {
-        AnimationControlBar(
-          isPlaying = isPlayingAnimation,
-          currentTimeSec = currentAnimationTimeSec,
-          durationSec = selectedModel?.animationDurationSec ?: 4.0f,
-          speed = animationSpeed,
-          currentTrack = selectedAnimationTrack,
-          totalTracks = spatialSurfaceView.filamentEngine.getAnimationTrackCount(),
-          onPlayPauseToggle = {
-            hapticManager.performClick()
-            viewModel.toggleAnimationPlay()
-          },
-          onSpeedChange = { speed ->
-            viewModel.setAnimationSpeed(speed)
-          },
-          onScrubTime = { time ->
-            viewModel.scrubAnimation(time)
-            spatialSurfaceView.filamentEngine.seekAnimationTo(time)
-          }
-        )
-      }
     }
 
     // 8. BOTTOM CONTROLS: Floating Action Pill [ PHOTO | (● REC) | Open | Clear ]

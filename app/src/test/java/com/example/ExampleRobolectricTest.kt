@@ -136,4 +136,12 @@ class ExampleRobolectricTest {
     assertNull(viewModel.nearbyExhibit.value)
     assertEquals(0, viewModel.telemetry.value.vertexCount)
   }
+
+  @Test
+  fun `verify switching to MR mode activates stereoscopic mode`() {
+    val app = ApplicationProvider.getApplicationContext<Application>()
+    val viewModel = SpatialViewModel(app)
+    viewModel.setDisplayMode(com.example.model.DisplayMode.MR)
+    assertEquals(com.example.model.DisplayMode.MR, viewModel.displayMode.value)
+  }
 }

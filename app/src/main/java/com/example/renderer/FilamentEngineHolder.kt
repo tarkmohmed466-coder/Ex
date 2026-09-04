@@ -193,7 +193,12 @@ class FilamentEngineHolder(private val context: Context) {
     val eng = Engine.create()
     engine = eng
 
-    val rend = eng.createRenderer()
+    val rend = eng.createRenderer().apply {
+      clearOptions = Renderer.ClearOptions().apply {
+        clear = true
+        clearColor = floatArrayOf(0.0f, 0.0f, 0.0f, 0.0f)
+      }
+    }
     renderer = rend
 
     val scn = eng.createScene()
@@ -559,6 +564,25 @@ class FilamentEngineHolder(private val context: Context) {
   /**
    * Dual-viewport Stereoscopic MR Pass with Asymmetric Off-Axis Frustums.
    */
+  fun updateArCamera(pitch: Float = 0f, yaw: Float = 0f, roll: Float = 0f) {
+    val cam = camera ?: return
+    val aspect = surfaceWidth.toDouble() / maxOf(surfaceHeight.toDouble(), 1.0)
+    cam.setProjection(45.0, aspect, 0.05, 50.0, Camera.Fov.VERTICAL)
+
+    val radPitch = Math.toRadians((pitch + 15f).toDouble())
+    val radYaw = Math.toRadians((yaw + 30f).toDouble())
+
+    val eyeX = (orbitDistance * cos(radPitch) * sin(radYaw) + panX).toDouble()
+    val eyeY = (orbitDistance * sin(radPitch) + panY).toDouble()
+    val eyeZ = (orbitDistance * cos(radPitch) * cos(radYaw)).toDouble()
+
+    cam.lookAt(
+      eyeX, eyeY, eyeZ,
+      panX.toDouble(), panY.toDouble(), 0.0,
+      0.0, 1.0, 0.0
+    )
+  }
+
   fun renderStereoFrame(
     frameTimeNanos: Long,
     ipdMeters: Float,
@@ -571,50 +595,45 @@ class FilamentEngineHolder(private val context: Context) {
 
     if (!rend.beginFrame(sc, frameTimeNanos)) return
 
-    val halfWidth = surfaceWidth / 2
-    val halfIpd = ipdMeters / 2.0f
-    val nearPlane = 0.05f
-    val farPlane = 50.0f
-    val focalDistance = 1.5f
-    val fovYRad = Math.toRadians(45.0).toFloat()
-    val top = nearPlane * tan(fovYRad / 2.0f)
-    val bottom = -top
-    val aspect = halfWidth.toFloat() / surfaceHeight.toFloat()
-    val a = aspect * tan(fovYRad / 2.0f) * focalDistance
+    val halfWidth = maxOf(surfaceWidth / 2, 1)
+    val halfIpd = (ipdMeters / 2.0f).toDouble()
+    val aspect = halfWidth.toDouble() / maxOf(surfaceHeight.toDouble(), 1.0)
 
     updateAssetAnimations(frameTimeNanos)
     updateAllExhibitAnchorTransforms()
 
-    // 1. Left Eye
+    // 1. Left Eye (Left Camera Viewport)
     v.viewport = Viewport(0, 0, halfWidth, surfaceHeight)
+    cam.setProjection(45.0, aspect, 0.05, 50.0, Camera.Fov.VERTICAL)
     if (headPoseMatrix != null) {
       System.arraycopy(headPoseMatrix, 0, scratchLeftEyeMatrix, 0, 16)
-      Matrix.translateM(scratchLeftEyeMatrix, 0, -halfIpd, 0f, 0f)
+      Matrix.translateM(scratchLeftEyeMatrix, 0, -halfIpd.toFloat(), 0f, 0f)
       for (i in 0 until 16) scratchViewDouble[i] = scratchLeftEyeMatrix[i].toDouble()
       cam.setModelMatrix(scratchViewDouble)
+    } else {
+      cam.lookAt(
+        -halfIpd, 0.0, orbitDistance.toDouble(),
+        0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0
+      )
     }
-
-    val leftFrustum = -a + halfIpd * (nearPlane / focalDistance)
-    val rightFrustum = a + halfIpd * (nearPlane / focalDistance)
-    Matrix.frustumM(scratchLeftProjMatrix, 0, leftFrustum, rightFrustum, bottom, top, nearPlane, farPlane)
-    for (i in 0 until 16) scratchProjDouble[i] = scratchLeftProjMatrix[i].toDouble()
-    cam.setCustomProjection(scratchProjDouble, nearPlane.toDouble(), farPlane.toDouble())
     rend.render(v)
 
-    // 2. Right Eye
+    // 2. Right Eye (Right Camera Viewport)
     v.viewport = Viewport(halfWidth, 0, halfWidth, surfaceHeight)
+    cam.setProjection(45.0, aspect, 0.05, 50.0, Camera.Fov.VERTICAL)
     if (headPoseMatrix != null) {
       System.arraycopy(headPoseMatrix, 0, scratchRightEyeMatrix, 0, 16)
-      Matrix.translateM(scratchRightEyeMatrix, 0, halfIpd, 0f, 0f)
+      Matrix.translateM(scratchRightEyeMatrix, 0, halfIpd.toFloat(), 0f, 0f)
       for (i in 0 until 16) scratchViewDouble[i] = scratchRightEyeMatrix[i].toDouble()
       cam.setModelMatrix(scratchViewDouble)
+    } else {
+      cam.lookAt(
+        halfIpd, 0.0, orbitDistance.toDouble(),
+        0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0
+      )
     }
-
-    val rightEyeLeftFrustum = -a - halfIpd * (nearPlane / focalDistance)
-    val rightEyeRightFrustum = a - halfIpd * (nearPlane / focalDistance)
-    Matrix.frustumM(scratchRightProjMatrix, 0, rightEyeLeftFrustum, rightEyeRightFrustum, bottom, top, nearPlane, farPlane)
-    for (i in 0 until 16) scratchProjDouble[i] = scratchRightProjMatrix[i].toDouble()
-    cam.setCustomProjection(scratchProjDouble, nearPlane.toDouble(), farPlane.toDouble())
     rend.render(v)
 
     rend.endFrame()
@@ -738,8 +757,16 @@ class FilamentEngineHolder(private val context: Context) {
     val scn = scene ?: return
     val asset = currentAsset ?: return
 
+    val root = asset.root
+    if (root != 0) {
+      scn.remove(root)
+    }
     scn.removeEntities(asset.entities)
-    loader.destroyAsset(asset)
+    try {
+      loader.destroyAsset(asset)
+    } catch (e: Exception) {
+      Log.e(TAG, "Error destroying asset: ${e.message}")
+    }
     currentAsset = null
     currentInstance = null
     recalculateSceneMetrics()
