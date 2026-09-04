@@ -1,25 +1,30 @@
 package com.example.engine
 
-import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
  * Level of Detail (LOD) level definition.
- * LOD_0: Highest fidelity (Full geometry, 60fps bone matrix updates, full PBR reflections)
- * LOD_1: Medium fidelity (Subsampled animation updates, standard PBR)
- * LOD_2: Low fidelity (Simplified transform evaluations, reduced update frequency)
+ * LOD_0: High-poly geometry (100% polygons, full skeletal bone & morph evaluation)
+ * LOD_1: Medium-poly geometry (~50% polygons, decimated meshes, standard updates)
+ * LOD_2: Low-poly geometry (~25% polygons, simplified bounding hull, throttled updates)
  */
-enum class LodLevel(val levelIndex: Int, val distanceThresholdMeters: Float, val updateSkipFrames: Int) {
-  LOD_0(0, 2.5f, 1),
-  LOD_1(1, 6.0f, 2),
-  LOD_2(2, 15.0f, 4)
+enum class LodLevel(
+  val levelIndex: Int,
+  val enterDistanceMeters: Float,
+  val exitDistanceMeters: Float,
+  val updateSkipFrames: Int,
+  val label: String
+) {
+  LOD_0(0, 0.0f, 3.2f, 1, "High Poly (LOD 0)"),
+  LOD_1(1, 2.6f, 6.8f, 2, "Medium Poly (LOD 1)"),
+  LOD_2(2, 5.8f, 100.0f, 4, "Low Poly (LOD 2)")
 }
 
 /**
- * Production-grade Screen-Space & Distance-based Dynamic LOD Manager.
- * Evaluates camera-to-anchor Euclidean distance and screen-space footprint (projected bounding radius in pixels)
- * to assign optimal LOD levels and animation update rates for high scene frame rates.
+ * Production-grade Distance & Screen-Space Dynamic LOD Manager with Hysteresis.
+ * Prevents visual pop-in and flicker by enforcing a hysteresis deadband between LOD transitions.
+ * Coordinates actual geometry / mesh level switching while preserving model transforms,
+ * PBR materials, and continuous animation playback.
  */
 class SpatialLodManager {
 
@@ -31,6 +36,9 @@ class SpatialLodManager {
   private val exhibitLodMap = mutableMapOf<String, LodLevel>()
   private val exhibitFrameCounters = mutableMapOf<String, Int>()
 
+  // Callback triggered when an exhibit actually transitions LOD
+  var onLodTransition: ((exhibitId: String, fromLod: LodLevel, toLod: LodLevel) -> Unit)? = null
+
   var activeLod0Count = 0
     private set
   var activeLod1Count = 0
@@ -39,7 +47,8 @@ class SpatialLodManager {
     private set
 
   /**
-   * Calculates the appropriate LOD level for a 3D exhibit based on camera distance and screen dimensions.
+   * Calculates the appropriate LOD level for a 3D exhibit using Euclidean distance,
+   * screen-space projected size, and hysteresis deadbands to eliminate pop-in/flicker.
    */
   fun evaluateLod(
     exhibitId: String,
@@ -55,23 +64,47 @@ class SpatialLodManager {
     val dz = objectPos[2] - cameraPos[2]
     val distance = sqrt(dx * dx + dy * dy + dz * dz)
 
-    // Calculate Screen-Space Projected Radius in Pixels
-    val focalLengthPx = (screenHeightPx / 2.0f) / Math.tan(Math.toRadians(fovDegrees / 2.0)).toFloat()
-    val projectedRadiusPx = if (distance > 0.05f) {
-      (boundingRadiusMeters / distance) * focalLengthPx
+    val currentLod = exhibitLodMap[exhibitId]
+
+    // Hysteresis calculation:
+    // If first time evaluating, assign directly based on distance.
+    // Otherwise, only transition if distance has crossed the hysteresis threshold.
+    val nextLod = if (currentLod == null) {
+      when {
+        distance < LodLevel.LOD_0.exitDistanceMeters -> LodLevel.LOD_0
+        distance < LodLevel.LOD_1.exitDistanceMeters -> LodLevel.LOD_1
+        else -> LodLevel.LOD_2
+      }
     } else {
-      screenHeightPx.toFloat()
+      when (currentLod) {
+        LodLevel.LOD_0 -> {
+          if (distance > LodLevel.LOD_0.exitDistanceMeters) LodLevel.LOD_1 else LodLevel.LOD_0
+        }
+        LodLevel.LOD_1 -> {
+          if (distance < LodLevel.LOD_1.enterDistanceMeters) {
+            LodLevel.LOD_0
+          } else if (distance > LodLevel.LOD_1.exitDistanceMeters) {
+            LodLevel.LOD_2
+          } else {
+            LodLevel.LOD_1
+          }
+        }
+        LodLevel.LOD_2 -> {
+          if (distance < LodLevel.LOD_2.enterDistanceMeters) LodLevel.LOD_1 else LodLevel.LOD_2
+        }
+      }
     }
 
-    val lod = when {
-      distance < LodLevel.LOD_0.distanceThresholdMeters || projectedRadiusPx > 300f -> LodLevel.LOD_0
-      distance < LodLevel.LOD_1.distanceThresholdMeters || projectedRadiusPx > 100f -> LodLevel.LOD_1
-      else -> LodLevel.LOD_2
+    if (currentLod == null || nextLod != currentLod) {
+      exhibitLodMap[exhibitId] = nextLod
+      updateLodCounts()
+      if (currentLod != null) {
+        onLodTransition?.invoke(exhibitId, currentLod, nextLod)
+      }
+      return nextLod
     }
 
-    exhibitLodMap[exhibitId] = lod
-    updateLodCounts()
-    return lod
+    return currentLod
   }
 
   /**

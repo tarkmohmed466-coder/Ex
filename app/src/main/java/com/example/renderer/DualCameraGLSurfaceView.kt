@@ -61,6 +61,8 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   private var uTextureHandle = 0
   private var textureId = 0
 
+  var onCameraTextureReady: ((Int) -> Unit)? = null
+
   private var surfaceTexture: SurfaceTexture? = null
   private var cameraSurface: Surface? = null
   private var pendingRequest: SurfaceRequest? = null
@@ -203,6 +205,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
       val st = SurfaceTexture(textureId)
       st.setOnFrameAvailableListener(this)
       surfaceTexture = st
+      onCameraTextureReady?.invoke(textureId)
 
       val req = pendingRequest
       val exec = executor

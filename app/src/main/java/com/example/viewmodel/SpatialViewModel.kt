@@ -121,9 +121,9 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
   private var thermalGuard: ThermalGuardManager? = null
 
   init {
-    thermalGuard = ThermalGuardManager(application) { statusStr, isThrottled ->
+    thermalGuard = ThermalGuardManager(application) { level, statusStr ->
       _telemetry.update { it.copy(thermalStatus = statusStr) }
-      log("THERMAL", "Status: $statusStr (Throttled: $isThrottled)")
+      log("THERMAL", "Status: $statusStr (Level: ${level.name}, Throttled: ${level.isThrottled})")
     }
     thermalGuard?.startMonitoring()
   }

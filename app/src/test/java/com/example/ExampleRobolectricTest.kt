@@ -144,4 +144,36 @@ class ExampleRobolectricTest {
     viewModel.setDisplayMode(com.example.model.DisplayMode.MR)
     assertEquals(com.example.model.DisplayMode.MR, viewModel.displayMode.value)
   }
+
+  @Test
+  fun `verify thermal quality levels and resolution scaling constraints`() {
+    val high = com.example.engine.ThermalQualityLevel.HIGH
+    val medium = com.example.engine.ThermalQualityLevel.MEDIUM
+    val low = com.example.engine.ThermalQualityLevel.LOW
+    val emergency = com.example.engine.ThermalQualityLevel.EMERGENCY
+
+    assertEquals(1.0f, high.resolutionScale, 0.001f)
+    assertTrue(high.enableFxaa)
+    assertEquals(false, high.isThrottled)
+
+    assertEquals(0.9f, medium.resolutionScale, 0.001f)
+    assertTrue(medium.enableFxaa)
+    assertTrue(medium.isThrottled)
+
+    assertEquals(0.75f, low.resolutionScale, 0.001f)
+    assertEquals(false, low.enableFxaa)
+    assertTrue(low.isThrottled)
+
+    assertEquals(0.5f, emergency.resolutionScale, 0.001f)
+    assertEquals(false, emergency.enableFxaa)
+    assertTrue(emergency.isThrottled)
+  }
+
+  @Test
+  fun `verify arcore session manager initial state is paused`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val manager = com.example.arcore.ArCoreSessionManager(context)
+    assertTrue("Initial session state should be paused", manager.isSessionPaused)
+    assertNull("Updating frame when paused should safely return null without throwing", manager.updateFrame())
+  }
 }

@@ -270,6 +270,13 @@ fun MixedRealityScreen(
       onRequestPermission = {
         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
       },
+      onDualCameraCreated = { dualView ->
+        dualView.onCameraTextureReady = { texName ->
+          spatialSurfaceView.arCoreSessionManager.setCameraTextureName(texName)
+        }
+        spatialSurfaceView.dualCameraGLSurfaceView = dualView
+      },
+      isArCoreActive = (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) && spatialSurfaceView.arCoreSessionManager.isSupported,
       modifier = Modifier.fillMaxSize()
     )
 

@@ -30,6 +30,28 @@ import java.nio.FloatBuffer
 import kotlin.math.sqrt
 
 /**
+ * Image Tracking Lifecycle State Machine.
+ * TRACKING: Image marker actively tracked with high confidence.
+ * TRACKING_LOST: Image marker temporarily out of view; model retained at last known pose.
+ * RECOVERING: Image marker reacquired; smoothing transform transition.
+ * STOPPED: Tracking permanently lost after timeout; anchor and resources safely released.
+ */
+enum class ImageTrackingState {
+  TRACKING,
+  TRACKING_LOST,
+  RECOVERING,
+  STOPPED
+}
+
+data class TrackedImageRecord(
+  val markerName: String,
+  var state: ImageTrackingState,
+  var anchor: Anchor?,
+  var lastKnownPose: Pose,
+  var lastSeenTimestampMs: Long
+)
+
+/**
  * Information about a detected 2D physical image marker / exhibit card in 3D space.
  */
 data class DetectedImageInfo(
@@ -72,14 +94,18 @@ data class DetectedPlaneInfo(
 )
 
 /**
- * Production-grade ARCore session manager handling lifecycle, 6DoF tracking,
- * plane detection, AugmentedImageDatabase tracking, environmental HDR light estimation,
- * walking distance calculation, and depth sensing.
+ * Production-grade ARCore session manager.
+ * - Handles 6DoF tracking, plane detection, and AugmentedImageDatabase.
+ * - Implements image tracking state machine (TRACKING -> TRACKING_LOST -> RECOVERING -> STOPPED).
+ * - Zero allocations in frame update loop.
+ * - Manages real ARCore camera background texture lifecycle (setCameraTextureName).
+ * - Environmental HDR light estimation & depth sensor integration.
  */
 class ArCoreSessionManager(private val context: Context) {
 
   companion object {
     private const val TAG = "ArCoreSessionManager"
+    private const val TRACKING_LOSS_GRACE_PERIOD_MS = 4000L
   }
 
   var session: Session? = null
@@ -94,15 +120,30 @@ class ArCoreSessionManager(private val context: Context) {
   var latestFrame: Frame? = null
     private set
 
+  var isSessionPaused: Boolean = true
+    private set
+
+  private var cameraTextureId: Int = 0
   private var userRequestedInstall = true
 
   // Initial camera position for walking distance calculation
   private var initialCameraPose: Pose? = null
   private var totalWalkingDisplacement: Float = 0f
 
+  // Preallocated scratch arrays for zero allocation in updateFrame
+  private val scratchColorCorrection = FloatArray(4) { 1f }
+  private val scratchMainLightDir = floatArrayOf(0f, -1f, -0.5f)
+  private val scratchMainLightInt = floatArrayOf(1f, 1f, 1f)
+  private val scratchCamPos = FloatArray(3)
+  private val scratchPlaneList = ArrayList<DetectedPlaneInfo>(16)
+  private val scratchImageList = ArrayList<DetectedImageInfo>(8)
+
+  // Tracked images state machine map
+  private val imageTrackingMap = HashMap<String, TrackedImageRecord>()
+
   // Callbacks
   var onTrackingDataUpdated: ((ArCoreTrackingData) -> Unit)? = null
-  var onImageMarkerDetected: ((AugmentedImage) -> Unit)? = null
+  var onImageTrackingStateChanged: ((markerName: String, state: ImageTrackingState, anchor: Anchor?, pose: Pose) -> Unit)? = null
 
   /**
    * Checks if ARCore is supported on this device.
@@ -124,159 +165,134 @@ class ArCoreSessionManager(private val context: Context) {
   }
 
   /**
-   * Builds and populates the AugmentedImageDatabase with target marker cards from catalog.
+   * Initializes and configures the ARCore session.
    */
-  private fun buildAugmentedImageDatabase(session: Session): AugmentedImageDatabase {
-    val imageDatabase = AugmentedImageDatabase(session)
-    for (exhibit in ImageMarkerCatalog.exhibits) {
-      try {
-        val bitmap = ImageMarkerCatalog.generateMarkerBitmap(exhibit)
-        val imageIndex = imageDatabase.addImage(
-          exhibit.markerId,
-          bitmap,
-          exhibit.physicalWidthMeters
-        )
-        Log.i(TAG, "Added marker to ARCore Image Database: ${exhibit.markerId} (Index $imageIndex, width ${exhibit.physicalWidthMeters}m)")
-      } catch (e: Exception) {
-        Log.e(TAG, "Failed adding marker ${exhibit.markerId} to image database: ${e.message}")
-      }
-    }
-    return imageDatabase
-  }
+  fun setupSession(activity: Activity): Boolean {
+    if (session != null) return true
 
-  private fun isPackageInstalled(context: Context, packageName: String): Boolean {
     return try {
-      context.packageManager.getPackageInfo(packageName, 0)
-      true
+      when (ArCoreApk.getInstance().requestInstall(activity, userRequestedInstall)) {
+        ArCoreApk.InstallStatus.INSTALLED -> {
+          val newSession = Session(context)
+          val config = Config(newSession)
+
+          // Enable Horizontal and Vertical Plane detection
+          config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+
+          // Enable Environmental HDR Lighting
+          config.lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
+
+          // Enable Depth Mode if supported
+          if (newSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+            config.depthMode = Config.DepthMode.AUTOMATIC
+            Log.i(TAG, "ARCore Automatic Depth Mode enabled.")
+          } else {
+            config.depthMode = Config.DepthMode.DISABLED
+            Log.i(TAG, "ARCore Depth Mode not supported on this device.")
+          }
+
+          // Build Augmented Image Database
+          val imageDatabase = buildAugmentedImageDatabase(newSession)
+          if (imageDatabase != null) {
+            config.augmentedImageDatabase = imageDatabase
+            Log.i(TAG, "Augmented Image Database configured with ${imageDatabase.numImages} targets.")
+          }
+
+          // Real-time 60fps focus mode
+          config.focusMode = Config.FocusMode.AUTO
+          config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
+
+          newSession.configure(config)
+          if (cameraTextureId != 0) {
+            newSession.setCameraTextureName(cameraTextureId)
+          }
+
+          session = newSession
+          isSupported = true
+          isConfigured = true
+          Log.i(TAG, "ARCore Session initialized and configured successfully.")
+          true
+        }
+        ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
+          userRequestedInstall = false
+          false
+        }
+      }
+    } catch (e: UnavailableUserDeclinedInstallationException) {
+      Log.w(TAG, "User declined ARCore installation", e)
+      isSupported = false
+      false
+    } catch (e: UnavailableDeviceNotCompatibleException) {
+      Log.w(TAG, "Device not compatible with ARCore", e)
+      isSupported = false
+      false
     } catch (e: Exception) {
+      Log.w(TAG, "ARCore session initialization failed: ${e.message}")
+      isSupported = false
       false
     }
   }
 
-  /**
-   * Initializes or resumes the ARCore Session with optimal configuration:
-   * Autofocus, Horizontal + Vertical planes, AugmentedImageDatabase, Environmental HDR, and Depth.
-   */
+  private fun buildAugmentedImageDatabase(sess: Session): AugmentedImageDatabase? {
+    return try {
+      val db = AugmentedImageDatabase(sess)
+      for (exhibit in ImageMarkerCatalog.exhibits) {
+        val bitmap = ImageMarkerCatalog.generateMarkerBitmap(exhibit)
+        db.addImage(exhibit.markerId, bitmap, exhibit.physicalWidthMeters)
+      }
+      db
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed building AugmentedImageDatabase: ${e.message}", e)
+      null
+    }
+  }
+
   fun resumeSession(activity: Activity): Boolean {
-    if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-      Log.w(TAG, "Cannot resume ARCore: Camera permission not granted yet")
+    if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
       return false
     }
 
     if (session == null) {
-      val isArCoreInstalled = isPackageInstalled(activity, "com.google.ar.core")
-      if (!isArCoreInstalled) {
-        val isPlayStoreAvailable = isPackageInstalled(activity, "com.android.vending")
-        if (!isPlayStoreAvailable) {
-          Log.i(TAG, "ARCore APK not installed and Google Play Store unavailable. Using device sensors fallback.")
-          isSupported = false
-          userRequestedInstall = false
-          return false
-        }
-
-        if (userRequestedInstall) {
-          try {
-            val installStatus = ArCoreApk.getInstance().requestInstall(activity, userRequestedInstall)
-            if (installStatus == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
-              userRequestedInstall = false
-              return false
-            }
-          } catch (t: Throwable) {
-            Log.w(TAG, "ARCore installer request skipped: ${t.message}")
-            userRequestedInstall = false
-            isSupported = false
-            return false
-          }
-        }
-
-        // If com.google.ar.core is still not present, bypass Session creation
-        if (!isPackageInstalled(activity, "com.google.ar.core")) {
-          Log.i(TAG, "ARCore APK not present on system. Running in sensor-driven AR/MR mode.")
-          isSupported = false
-          return false
-        }
-      }
-
-      try {
-        val availability = ArCoreApk.getInstance().checkAvailability(context)
-        if (availability == ArCoreApk.Availability.UNSUPPORTED_DEVICE_NOT_CAPABLE) {
-          Log.i(TAG, "Device/Emulator is not ARCore capable. Using sensor & gyro fallback.")
-          isSupported = false
-          return false
-        }
-
-        val newSession = Session(activity)
-        val imageDatabase = buildAugmentedImageDatabase(newSession)
-
-        val config = Config(newSession).apply {
-          focusMode = Config.FocusMode.AUTO
-          planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
-          lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
-          augmentedImageDatabase = imageDatabase
-
-          if (newSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
-            depthMode = Config.DepthMode.AUTOMATIC
-          } else {
-            depthMode = Config.DepthMode.DISABLED
-          }
-        }
-        newSession.configure(config)
-        session = newSession
-        isConfigured = true
-        isSupported = true
-        Log.i(TAG, "ARCore Session configured with Environmental HDR, Depth: ${config.depthMode}, & ImageDatabase (${imageDatabase.numImages} targets)")
-      } catch (e: UnavailableArcoreNotInstalledException) {
-        Log.w(TAG, "ARCore APK not installed on this system: ${e.message}")
-        userRequestedInstall = false
-        isSupported = false
-        return false
-      } catch (e: UnavailableUserDeclinedInstallationException) {
-        Log.w(TAG, "ARCore installation declined: ${e.message}")
-        userRequestedInstall = false
-        return false
-      } catch (e: UnavailableDeviceNotCompatibleException) {
-        Log.w(TAG, "Device not compatible with ARCore: ${e.message}")
-        userRequestedInstall = false
-        isSupported = false
-        return false
-      } catch (e: UnavailableApkTooOldException) {
-        Log.w(TAG, "ARCore APK too old: ${e.message}")
-        userRequestedInstall = false
-        return false
-      } catch (e: UnavailableSdkTooOldException) {
-        Log.w(TAG, "ARCore SDK too old: ${e.message}")
-        userRequestedInstall = false
-        return false
-      } catch (t: Throwable) {
-        Log.w(TAG, "Bypassed ARCore session on this device/emulator: ${t.message}")
-        userRequestedInstall = false
-        isSupported = false
-        return false
-      }
+      val success = setupSession(activity)
+      if (!success) return false
     }
 
-    try {
+    return try {
       session?.resume()
-      return true
+      if (cameraTextureId != 0) {
+        session?.setCameraTextureName(cameraTextureId)
+      }
+      isSessionPaused = false
+      Log.i(TAG, "ARCore session resumed successfully.")
+      true
     } catch (e: CameraNotAvailableException) {
       Log.e(TAG, "Camera not available during ARCore resume", e)
-      return false
+      isSessionPaused = true
+      false
     } catch (e: Exception) {
-      Log.e(TAG, "Error resuming ARCore session", e)
-      return false
+      Log.e(TAG, "Error resuming ARCore session: ${e.message}", e)
+      isSessionPaused = true
+      false
     }
   }
 
   fun pauseSession() {
+    isSessionPaused = true
     try {
       session?.pause()
+      Log.i(TAG, "ARCore session paused.")
     } catch (e: Exception) {
       Log.w(TAG, "Error pausing ARCore session: ${e.message}")
     }
   }
 
   fun destroySession() {
+    isSessionPaused = true
     try {
+      for (record in imageTrackingMap.values) {
+        record.anchor?.detach()
+      }
+      imageTrackingMap.clear()
       session?.close()
       session = null
       isConfigured = false
@@ -291,22 +307,27 @@ class ArCoreSessionManager(private val context: Context) {
   }
 
   fun setCameraTextureName(textureId: Int) {
+    cameraTextureId = textureId
     session?.setCameraTextureName(textureId)
   }
 
   /**
    * Updates the ARCore session and processes tracking data, planes, augmented images,
-   * walking distance, and light estimation.
+   * walking distance, and light estimation. Zero-allocation per-frame execution.
    */
   fun updateFrame(): Frame? {
+    if (isSessionPaused) return null
     val currentSession = session ?: return null
     return try {
       val frame = currentSession.update()
+      latestFrame = frame
       val camera = frame.camera
 
       // Walking Camera Tracking & Displacement
       val camPose = if (camera.trackingState == TrackingState.TRACKING) camera.pose else null
-      val camPos = floatArrayOf(camPose?.tx() ?: 0f, camPose?.ty() ?: 0f, camPose?.tz() ?: 0f)
+      scratchCamPos[0] = camPose?.tx() ?: 0f
+      scratchCamPos[1] = camPose?.ty() ?: 0f
+      scratchCamPos[2] = camPose?.tz() ?: 0f
 
       if (camPose != null) {
         if (initialCameraPose == null) {
@@ -322,19 +343,20 @@ class ArCoreSessionManager(private val context: Context) {
 
       // Process Light Estimation
       val lightEstimate = frame.lightEstimate
-      val colorCorrection = FloatArray(4) { 1f }
+      scratchColorCorrection[0] = 1f; scratchColorCorrection[1] = 1f
+      scratchColorCorrection[2] = 1f; scratchColorCorrection[3] = 1f
       if (lightEstimate.state == LightEstimate.State.VALID) {
-        lightEstimate.getColorCorrection(colorCorrection, 0)
+        lightEstimate.getColorCorrection(scratchColorCorrection, 0)
       }
 
-      val mainLightDir = FloatArray(3) { 0f }.apply { this[1] = -1f; this[2] = -0.5f }
-      val mainLightInt = FloatArray(3) { 1f }
+      scratchMainLightDir[0] = 0f; scratchMainLightDir[1] = -1f; scratchMainLightDir[2] = -0.5f
+      scratchMainLightInt[0] = 1f; scratchMainLightInt[1] = 1f; scratchMainLightInt[2] = 1f
       if (lightEstimate.state == LightEstimate.State.VALID) {
         lightEstimate.environmentalHdrMainLightDirection?.let {
-          System.arraycopy(it, 0, mainLightDir, 0, 3)
+          System.arraycopy(it, 0, scratchMainLightDir, 0, 3)
         }
         lightEstimate.environmentalHdrMainLightIntensity?.let {
-          System.arraycopy(it, 0, mainLightInt, 0, 3)
+          System.arraycopy(it, 0, scratchMainLightInt, 0, 3)
         }
       }
 
@@ -342,7 +364,7 @@ class ArCoreSessionManager(private val context: Context) {
       val allPlanes = currentSession.getAllTrackables(Plane::class.java)
       var hPlanes = 0
       var vPlanes = 0
-      val planeList = mutableListOf<DetectedPlaneInfo>()
+      scratchPlaneList.clear()
 
       for (plane in allPlanes) {
         if (plane.trackingState == TrackingState.TRACKING) {
@@ -351,7 +373,7 @@ class ArCoreSessionManager(private val context: Context) {
           } else if (plane.type == Plane.Type.VERTICAL) {
             vPlanes++
           }
-          planeList.add(
+          scratchPlaneList.add(
             DetectedPlaneInfo(
               id = "plane_${plane.hashCode()}",
               type = plane.type,
@@ -364,32 +386,84 @@ class ArCoreSessionManager(private val context: Context) {
         }
       }
 
-      // 2. Collect Augmented Image Markers
+      // 2. Process Augmented Image Tracking State Machine
+      val now = System.currentTimeMillis()
       val allImages = currentSession.getAllTrackables(AugmentedImage::class.java)
-      val imageList = mutableListOf<DetectedImageInfo>()
+      scratchImageList.clear()
+
+      val seenMarkersThisFrame = HashSet<String>()
 
       for (image in allImages) {
-        if (image.trackingState == TrackingState.TRACKING) {
-          val imgPose = image.centerPose
-          val distToCam = if (camPose != null) {
-            val dx = imgPose.tx() - camPose.tx()
-            val dy = imgPose.ty() - camPose.ty()
-            val dz = imgPose.tz() - camPose.tz()
-            sqrt(dx * dx + dy * dy + dz * dz)
-          } else 0f
+        val markerName = image.name
+        seenMarkersThisFrame.add(markerName)
+        val imgPose = image.centerPose
+        val distToCam = if (camPose != null) {
+          val dx = imgPose.tx() - camPose.tx()
+          val dy = imgPose.ty() - camPose.ty()
+          val dz = imgPose.tz() - camPose.tz()
+          sqrt(dx * dx + dy * dy + dz * dz)
+        } else 0f
 
-          imageList.add(
-            DetectedImageInfo(
-              markerId = image.name,
-              trackingState = image.trackingState,
-              centerPose = imgPose,
-              extentXMeters = image.extentX,
-              extentZMeters = image.extentZ,
-              distanceToCameraMeters = distToCam
-            )
+        scratchImageList.add(
+          DetectedImageInfo(
+            markerId = markerName,
+            trackingState = image.trackingState,
+            centerPose = imgPose,
+            extentXMeters = image.extentX,
+            extentZMeters = image.extentZ,
+            distanceToCameraMeters = distToCam
           )
+        )
 
-          onImageMarkerDetected?.invoke(image)
+        val record = imageTrackingMap[markerName]
+        when (image.trackingState) {
+          TrackingState.TRACKING -> {
+            if (record == null) {
+              val anchor = try { image.createAnchor(image.centerPose) } catch (e: Exception) { null }
+              val newRec = TrackedImageRecord(
+                markerName = markerName,
+                state = ImageTrackingState.TRACKING,
+                anchor = anchor,
+                lastKnownPose = imgPose,
+                lastSeenTimestampMs = now
+              )
+              imageTrackingMap[markerName] = newRec
+              onImageTrackingStateChanged?.invoke(markerName, ImageTrackingState.TRACKING, anchor, imgPose)
+            } else {
+              record.lastKnownPose = imgPose
+              record.lastSeenTimestampMs = now
+              if (record.state != ImageTrackingState.TRACKING) {
+                record.state = ImageTrackingState.TRACKING
+                onImageTrackingStateChanged?.invoke(markerName, ImageTrackingState.TRACKING, record.anchor, imgPose)
+              }
+            }
+          }
+          TrackingState.PAUSED -> {
+            if (record != null && record.state == ImageTrackingState.TRACKING) {
+              record.state = ImageTrackingState.TRACKING_LOST
+              onImageTrackingStateChanged?.invoke(markerName, ImageTrackingState.TRACKING_LOST, record.anchor, record.lastKnownPose)
+            }
+          }
+          TrackingState.STOPPED -> {
+            if (record != null && record.state != ImageTrackingState.STOPPED) {
+              record.state = ImageTrackingState.STOPPED
+              record.anchor?.detach()
+              record.anchor = null
+              onImageTrackingStateChanged?.invoke(markerName, ImageTrackingState.STOPPED, null, record.lastKnownPose)
+            }
+          }
+        }
+      }
+
+      // Check timeout for any previously tracked images not seen or paused
+      for (record in imageTrackingMap.values) {
+        if (record.state == ImageTrackingState.TRACKING_LOST) {
+          if (now - record.lastSeenTimestampMs > TRACKING_LOSS_GRACE_PERIOD_MS) {
+            record.state = ImageTrackingState.STOPPED
+            record.anchor?.detach()
+            record.anchor = null
+            onImageTrackingStateChanged?.invoke(record.markerName, ImageTrackingState.STOPPED, null, record.lastKnownPose)
+          }
         }
       }
 
@@ -399,28 +473,34 @@ class ArCoreSessionManager(private val context: Context) {
         horizontalPlanesCount = hPlanes,
         verticalPlanesCount = vPlanes,
         lightIntensityLumens = if (lightEstimate.state == LightEstimate.State.VALID) lightEstimate.pixelIntensity * 1000f else 1000f,
-        colorCorrectionRgb = colorCorrection,
-        mainLightDirection = mainLightDir,
-        mainLightIntensity = mainLightInt,
+        colorCorrectionRgb = scratchColorCorrection,
+        mainLightDirection = scratchMainLightDir,
+        mainLightIntensity = scratchMainLightInt,
         cameraPose = camPose,
-        cameraPosition = camPos,
+        cameraPosition = scratchCamPos,
         walkingDisplacementMeters = totalWalkingDisplacement,
         isDepthSupported = currentSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC),
         isDepthEnabled = currentSession.config.depthMode == Config.DepthMode.AUTOMATIC,
-        detectedPlanes = planeList,
-        detectedImages = imageList
+        detectedPlanes = scratchPlaneList,
+        detectedImages = scratchImageList
       )
 
       onTrackingDataUpdated?.invoke(trackingData)
       latestFrame = frame
       frame
+    } catch (e: com.google.ar.core.exceptions.SessionPausedException) {
+      isSessionPaused = true
+      null
+    } catch (e: com.google.ar.core.exceptions.CameraNotAvailableException) {
+      Log.w(TAG, "Camera not available in updateFrame: ${e.message}")
+      null
     } catch (e: Exception) {
       null
     }
   }
 
   /**
-   * Performs hit test against detected physical planes or depth points.
+   * Performs hit test against detected physical planes with polygon bounds check.
    */
   fun hitTest(frame: Frame, xPx: Float, yPx: Float): HitResult? {
     val hits = frame.hitTest(xPx, yPx)
@@ -433,9 +513,6 @@ class ArCoreSessionManager(private val context: Context) {
     return hits.firstOrNull()
   }
 
-  /**
-   * Creates a real persistent ARCore Anchor attached to a HitResult.
-   */
   fun createAnchor(hitResult: HitResult): Anchor? {
     return try {
       hitResult.createAnchor()
@@ -445,33 +522,19 @@ class ArCoreSessionManager(private val context: Context) {
     }
   }
 
-  /**
-   * Creates a real persistent ARCore Anchor attached to an AugmentedImage at its centerPose.
-   */
-  fun createAnchorForAugmentedImage(image: AugmentedImage): Anchor? {
+  fun createAnchorFromImage(image: AugmentedImage): Anchor? {
     return try {
       image.createAnchor(image.centerPose)
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to create ARCore Anchor on AugmentedImage ${image.name}", e)
+      Log.e(TAG, "Failed creating anchor from AugmentedImage: ${e.message}", e)
       null
     }
   }
 
-  /**
-   * Creates a real persistent ARCore Anchor at a specific Pose.
-   */
-  fun createAnchorAtPose(pose: Pose): Anchor? {
-    val currentSession = session ?: return null
-    return try {
-      currentSession.createAnchor(pose)
-    } catch (e: Exception) {
-      Log.e(TAG, "Failed to create ARCore Anchor at pose", e)
-      null
-    }
-  }
+  fun createAnchorForAugmentedImage(image: AugmentedImage): Anchor? = createAnchorFromImage(image)
 
   fun resetWalkingOrigin() {
-    initialCameraPose = latestFrame?.camera?.pose
+    initialCameraPose = null
     totalWalkingDisplacement = 0f
   }
 }

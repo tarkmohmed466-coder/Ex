@@ -183,6 +183,14 @@ class FilamentEngineHolder(private val context: Context) {
   var modelPhysicalDepthMeters: Float = 1.0f
     private set
 
+  // Base centering offset vector (computed from bounding box)
+  var baseCenterOffsetX: Float = 0f
+    private set
+  var baseCenterOffsetY: Float = 0f
+    private set
+  var baseCenterOffsetZ: Float = 0f
+    private set
+
   // Preallocated zero-allocation scratch buffers for high-frequency render loops
   private val scratchProjDouble = DoubleArray(16)
   private val scratchViewDouble = DoubleArray(16)
@@ -352,11 +360,15 @@ class FilamentEngineHolder(private val context: Context) {
         modelPhysicalHeightMeters = halfExtents[1] * 2.0f
         modelPhysicalDepthMeters = halfExtents[2] * 2.0f
 
+        baseCenterOffsetX = -center[0]
+        baseCenterOffsetY = -center[1] + halfExtents[1]
+        baseCenterOffsetZ = -center[2]
+
         val tm = eng.transformManager
         val rootInstance = tm.getInstance(asset.root)
 
         Matrix.setIdentityM(scratchTransformMatrix, 0)
-        Matrix.translateM(scratchTransformMatrix, 0, -center[0], -center[1] + halfExtents[1], -center[2])
+        Matrix.translateM(scratchTransformMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
         tm.setTransform(rootInstance, scratchTransformMatrix)
 
         recalculateSceneMetrics()
@@ -376,8 +388,34 @@ class FilamentEngineHolder(private val context: Context) {
   }
 
   /**
+   * Updates root transform for current primary asset in Object Mode.
+   * Model remains centered at origin, responsive to user gestures without compounding.
+   */
+  fun updateObjectModeTransform() {
+    val eng = engine ?: return
+    val asset = currentAsset ?: return
+    val tm = eng.transformManager
+    val rootInst = tm.getInstance(asset.root)
+    if (rootInst != 0) {
+      Matrix.setIdentityM(scratchModelMatrix, 0)
+      Matrix.translateM(scratchModelMatrix, 0, modelOffsetX, modelOffsetY, modelOffsetZ)
+      if (modelRotationDegrees != 0f) {
+        Matrix.rotateM(scratchModelMatrix, 0, modelRotationDegrees, 0f, 1f, 0f)
+      }
+      if (modelPitchDegrees != 0f) {
+        Matrix.rotateM(scratchModelMatrix, 0, modelPitchDegrees, 1f, 0f, 0f)
+      }
+      val scale = modelScale.coerceIn(0.02f, 25.0f)
+      Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
+      Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
+      tm.setTransform(rootInst, scratchModelMatrix)
+    }
+  }
+
+  /**
    * Spawns an additional 3D Exhibit into the multi-object Filament Scene
    * anchored to an ARCore Anchor (from Plane placement or Image Marker recognition).
+   * Enforces duplicate protection by exhibitId and markerId.
    */
   fun spawnExhibit(
     exhibitId: String,
@@ -388,6 +426,16 @@ class FilamentEngineHolder(private val context: Context) {
     source: ExhibitSource,
     markerId: String? = null
   ): ActiveSceneExhibit? {
+    // Duplicate Protection: If an exhibit with this ID or markerId is already active, reuse and update anchor
+    val existing = activeExhibits.firstOrNull { it.id == exhibitId || (markerId != null && it.markerId == markerId) }
+    if (existing != null) {
+      if (existing.anchor != anchor) {
+        existing.anchor?.detach()
+        existing.anchor = anchor
+      }
+      return existing
+    }
+
     val eng = engine ?: return null
     val loader = assetLoader ?: return null
     val resLoader = resourceLoader ?: return null
@@ -628,41 +676,70 @@ class FilamentEngineHolder(private val context: Context) {
     try {
       if (!rend.beginFrame(sc, frameTimeNanos)) return
 
-      val halfWidth = maxOf(surfaceWidth / 2, 1)
-      val halfIpd = (ipdMeters / 2.0f).toDouble()
-      val aspect = halfWidth.toDouble() / maxOf(surfaceHeight.toDouble(), 1.0)
+      val effectiveWidth = (surfaceWidth * dynamicResolutionScale).toInt()
+      val effectiveHeight = (surfaceHeight * dynamicResolutionScale).toInt()
+      val halfWidth = maxOf(effectiveWidth / 2, 1)
+      val clampedIpd = ipdMeters.coerceIn(0.050f, 0.075f)
+      val halfIpd = clampedIpd / 2.0f
+      val near = 0.05
+      val far = 50.0
+      val fovYRad = Math.toRadians(45.0)
+      val top = near * Math.tan(fovYRad / 2.0)
+      val bottom = -top
+      val eyeAspect = halfWidth.toDouble() / maxOf(effectiveHeight.toDouble(), 1.0)
+      val widthAtNear = 2.0 * top * eyeAspect
+      val zeroParallaxDist = 1.5 // 1.5 meters convergence distance
+      val shift = (halfIpd * (near / zeroParallaxDist)).toFloat()
 
       updateAssetAnimations(frameTimeNanos)
       updateAllExhibitAnchorTransforms()
 
-      // 1. Left Eye (Left Camera Viewport)
-      v.viewport = Viewport(0, 0, halfWidth, surfaceHeight)
-      cam.setProjection(45.0, aspect, 0.05, 50.0, Camera.Fov.VERTICAL)
+      // 1. Left Eye: Asymmetric Off-Axis Frustum
+      Matrix.frustumM(
+        scratchLeftProjMatrix, 0,
+        (-widthAtNear / 2.0 + shift).toFloat(),
+        (widthAtNear / 2.0 + shift).toFloat(),
+        bottom.toFloat(), top.toFloat(),
+        near.toFloat(), far.toFloat()
+      )
+      for (i in 0 until 16) scratchProjDouble[i] = scratchLeftProjMatrix[i].toDouble()
+      cam.setCustomProjection(scratchProjDouble, near, far)
+
+      v.viewport = Viewport(0, 0, halfWidth, effectiveHeight)
       if (headPoseMatrix != null) {
         System.arraycopy(headPoseMatrix, 0, scratchLeftEyeMatrix, 0, 16)
-        Matrix.translateM(scratchLeftEyeMatrix, 0, -halfIpd.toFloat(), 0f, 0f)
+        Matrix.translateM(scratchLeftEyeMatrix, 0, -halfIpd, 0f, 0f)
         for (i in 0 until 16) scratchViewDouble[i] = scratchLeftEyeMatrix[i].toDouble()
         cam.setModelMatrix(scratchViewDouble)
       } else {
         cam.lookAt(
-          -halfIpd, 0.0, orbitDistance.toDouble(),
+          -halfIpd.toDouble(), 0.0, orbitDistance.toDouble(),
           0.0, 0.0, 0.0,
           0.0, 1.0, 0.0
         )
       }
       rend.render(v)
 
-      // 2. Right Eye (Right Camera Viewport)
-      v.viewport = Viewport(halfWidth, 0, halfWidth, surfaceHeight)
-      cam.setProjection(45.0, aspect, 0.05, 50.0, Camera.Fov.VERTICAL)
+      // 2. Right Eye: Asymmetric Off-Axis Frustum
+      Matrix.frustumM(
+        scratchRightProjMatrix, 0,
+        (-widthAtNear / 2.0 - shift).toFloat(),
+        (widthAtNear / 2.0 - shift).toFloat(),
+        bottom.toFloat(), top.toFloat(),
+        near.toFloat(), far.toFloat()
+      )
+      for (i in 0 until 16) scratchProjDouble[i] = scratchRightProjMatrix[i].toDouble()
+      cam.setCustomProjection(scratchProjDouble, near, far)
+
+      v.viewport = Viewport(halfWidth, 0, halfWidth, effectiveHeight)
       if (headPoseMatrix != null) {
         System.arraycopy(headPoseMatrix, 0, scratchRightEyeMatrix, 0, 16)
-        Matrix.translateM(scratchRightEyeMatrix, 0, halfIpd.toFloat(), 0f, 0f)
+        Matrix.translateM(scratchRightEyeMatrix, 0, halfIpd, 0f, 0f)
         for (i in 0 until 16) scratchViewDouble[i] = scratchRightEyeMatrix[i].toDouble()
         cam.setModelMatrix(scratchViewDouble)
       } else {
         cam.lookAt(
-          halfIpd, 0.0, orbitDistance.toDouble(),
+          halfIpd.toDouble(), 0.0, orbitDistance.toDouble(),
           0.0, 0.0, 0.0,
           0.0, 1.0, 0.0
         )
@@ -762,6 +839,7 @@ class FilamentEngineHolder(private val context: Context) {
       }
       val scale = modelScale.coerceIn(0.02f, 25.0f)
       Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
+      Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
     }
   }
@@ -798,20 +876,40 @@ class FilamentEngineHolder(private val context: Context) {
       }
       val scale = modelScale.coerceIn(0.02f, 25.0f)
       Matrix.scaleM(scratchModelMatrix, 0, scale, scale, scale)
+      Matrix.translateM(scratchModelMatrix, 0, baseCenterOffsetX, baseCenterOffsetY, baseCenterOffsetZ)
       tm.setTransform(rootInst, scratchModelMatrix)
     }
   }
 
-  fun setThermalQualityReduction(isThrottled: Boolean) {
+  fun setThermalQualityLevel(level: com.example.engine.ThermalQualityLevel) {
     val v = view ?: return
-    if (isThrottled) {
-      v.sampleCount = 1
-      v.antiAliasing = View.AntiAliasing.NONE
-      Log.i(TAG, "Thermal Guard: Reduced MSAA to 1x and disabled FXAA.")
-    } else {
-      v.sampleCount = 1
-      v.antiAliasing = View.AntiAliasing.FXAA
+    when (level) {
+      com.example.engine.ThermalQualityLevel.HIGH -> {
+        v.sampleCount = level.msaaSamples
+        v.antiAliasing = if (level.enableFxaa) View.AntiAliasing.FXAA else View.AntiAliasing.NONE
+        dynamicResolutionScale = level.resolutionScale
+      }
+      com.example.engine.ThermalQualityLevel.MEDIUM -> {
+        v.sampleCount = level.msaaSamples
+        v.antiAliasing = if (level.enableFxaa) View.AntiAliasing.FXAA else View.AntiAliasing.NONE
+        dynamicResolutionScale = level.resolutionScale
+      }
+      com.example.engine.ThermalQualityLevel.LOW -> {
+        v.sampleCount = level.msaaSamples
+        v.antiAliasing = if (level.enableFxaa) View.AntiAliasing.FXAA else View.AntiAliasing.NONE
+        dynamicResolutionScale = level.resolutionScale
+      }
+      com.example.engine.ThermalQualityLevel.EMERGENCY -> {
+        v.sampleCount = level.msaaSamples
+        v.antiAliasing = if (level.enableFxaa) View.AntiAliasing.FXAA else View.AntiAliasing.NONE
+        dynamicResolutionScale = level.resolutionScale
+      }
     }
+    Log.i(TAG, "Thermal Guard applied ThermalQualityLevel: $level (Resolution: ${(dynamicResolutionScale * 100).toInt()}%)")
+  }
+
+  fun setThermalQualityReduction(isThrottled: Boolean) {
+    setThermalQualityLevel(if (isThrottled) com.example.engine.ThermalQualityLevel.LOW else com.example.engine.ThermalQualityLevel.HIGH)
   }
 
   fun zoomIn(step: Float = 0.35f) {

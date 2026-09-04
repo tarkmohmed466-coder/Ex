@@ -20,6 +20,7 @@ import com.example.arcore.DepthOcclusionManager
 import com.example.arcore.ExhibitMarker
 import com.example.arcore.ExhibitSource
 import com.example.arcore.ImageMarkerCatalog
+import com.example.arcore.ImageTrackingState
 import com.example.engine.DiagnosticsLogger
 import com.example.engine.SensorsManager
 import com.example.engine.TwoFingerRotateDetector
@@ -57,6 +58,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
   val filamentEngine = FilamentEngineHolder(context)
   val arCoreSessionManager = ArCoreSessionManager(context)
   val depthOcclusionManager = DepthOcclusionManager()
+
+  var dualCameraGLSurfaceView: DualCameraGLSurfaceView? = null
 
   private var isSurfaceReady = false
   private var isRendering = false
@@ -142,8 +145,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
       )
     }
 
-    arCoreSessionManager.onImageMarkerDetected = { image ->
-      handleAugmentedImageTracking(image)
+    arCoreSessionManager.onImageTrackingStateChanged = { markerName, state, anchor, pose ->
+      handleImageTrackingState(markerName, state, anchor, pose)
     }
 
     scaleGestureDetector = ScaleGestureDetector(
@@ -171,38 +174,52 @@ class SpatialSurfaceView @JvmOverloads constructor(
   }
 
   /**
-   * Handles ARCore AugmentedImage detection and binds it to its corresponding 3D Model Exhibit.
+   * Handles ARCore AugmentedImage tracking state changes with robust lifecycle handling:
+   * TRACKING -> TRACKING_LOST -> RECOVERING -> STOPPED.
+   * Retains 3D model in place during temporary loss and only releases when STOPPED.
    */
-  private fun handleAugmentedImageTracking(image: AugmentedImage) {
-    if (image.trackingState != TrackingState.TRACKING) return
-
-    val markerId = image.name
+  private fun handleImageTrackingState(markerId: String, state: ImageTrackingState, anchor: Anchor?, pose: Pose) {
     val marker = ImageMarkerCatalog.findByMarkerId(markerId) ?: return
 
-    if (!spawnedMarkerIds.contains(markerId)) {
-      spawnedMarkerIds.add(markerId)
-
-      val anchor = arCoreSessionManager.createAnchorForAugmentedImage(image)
-      if (anchor != null) {
-        activeArAnchors.add(anchor)
-        val glbBuffer = GltfAssetFactory.getPresetGlbBuffer(marker.modelId)
-        if (glbBuffer != null) {
-          val exhibitId = "exhibit_marker_${markerId}_${System.currentTimeMillis()}"
-          filamentEngine.spawnExhibit(
-            exhibitId = exhibitId,
-            modelId = marker.modelId,
-            title = marker.title,
-            buffer = glbBuffer,
-            anchor = anchor,
-            source = ExhibitSource.IMAGE_MARKER,
-            markerId = markerId
-          )
-
-          val pos = floatArrayOf(image.centerPose.tx(), image.centerPose.ty(), image.centerPose.tz())
-          onExhibitMarkerRecognized?.invoke(marker, pos)
-          onAnchorPlaced?.invoke(anchor, pos, ExhibitSource.IMAGE_MARKER, marker.modelId, marker.title)
-          Log.i(TAG, "Recognized Image Marker '${marker.title}' -> Spawned and Anchored 3D Exhibit at (${pos[0]}, ${pos[1]}, ${pos[2]})")
-          DiagnosticsLogger.log(TAG, "Image Marker Tracked: '${marker.title}' -> Placed 3D Object at (${pos[0]}, ${pos[1]}, ${pos[2]})")
+    when (state) {
+      ImageTrackingState.TRACKING -> {
+        val existing = filamentEngine.activeExhibits.firstOrNull { it.markerId == markerId }
+        if (existing == null && anchor != null) {
+          activeArAnchors.add(anchor)
+          val glbBuffer = GltfAssetFactory.getPresetGlbBuffer(marker.modelId)
+          if (glbBuffer != null) {
+            val exhibitId = "exhibit_marker_${markerId}"
+            filamentEngine.spawnExhibit(
+              exhibitId = exhibitId,
+              modelId = marker.modelId,
+              title = marker.title,
+              buffer = glbBuffer,
+              anchor = anchor,
+              source = ExhibitSource.IMAGE_MARKER,
+              markerId = markerId
+            )
+            val pos = floatArrayOf(pose.tx(), pose.ty(), pose.tz())
+            onExhibitMarkerRecognized?.invoke(marker, pos)
+            onAnchorPlaced?.invoke(anchor, pos, ExhibitSource.IMAGE_MARKER, marker.modelId, marker.title)
+            DiagnosticsLogger.log(TAG, "Image Marker Tracked: '${marker.title}' -> Anchored at (${pos[0]}, ${pos[1]}, ${pos[2]})")
+          }
+        } else if (existing != null && anchor != null) {
+          existing.anchor = anchor
+        }
+      }
+      ImageTrackingState.TRACKING_LOST -> {
+        // Retain 3D model in place at last known pose; do NOT delete immediately!
+        DiagnosticsLogger.log(TAG, "Image Marker '$markerId' temporarily lost -> holding pose")
+      }
+      ImageTrackingState.RECOVERING -> {
+        DiagnosticsLogger.log(TAG, "Image Marker '$markerId' tracking recovering")
+      }
+      ImageTrackingState.STOPPED -> {
+        val existing = filamentEngine.activeExhibits.firstOrNull { it.markerId == markerId }
+        if (existing != null) {
+          filamentEngine.removeExhibit(existing.id)
+          activeArAnchors.remove(existing.anchor)
+          DiagnosticsLogger.log(TAG, "Image Marker '$markerId' timed out -> removed 3D Exhibit")
         }
       }
     }
@@ -315,12 +332,16 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
       when (displayMode) {
         DisplayMode.OBJECT -> {
+          filamentEngine.updateObjectModeTransform()
           filamentEngine.updateOrbitCamera()
           filamentEngine.renderFrame(frameTimeNanos)
         }
 
         DisplayMode.AR -> {
           val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
+          if (frame != null) {
+            dualCameraGLSurfaceView?.requestRender()
+          }
           if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
             frame.camera.getProjectionMatrix(scratchProjMatrix, 0, 0.05f, 50.0f)
             frame.camera.getViewMatrix(scratchViewMatrix, 0)
@@ -392,6 +413,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
         DisplayMode.MR -> {
           val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
+          if (frame != null) {
+            dualCameraGLSurfaceView?.requestRender()
+          }
           val hasValidTracking = frame != null && frame.camera.trackingState == TrackingState.TRACKING
           if (hasValidTracking) {
             frame!!.camera.getViewMatrix(scratchHeadPoseMatrix, 0)
@@ -533,16 +557,36 @@ class SpatialSurfaceView @JvmOverloads constructor(
         val frame = arCoreSessionManager.latestFrame ?: return
         val hit = arCoreSessionManager.hitTest(frame, xPx, yPx)
         if (hit != null) {
+          val hitPose = hit.hitPose
+          val hx = hitPose.tx()
+          val hy = hitPose.ty()
+          val hz = hitPose.tz()
+
+          // Conflict Resolution: Check if tap is right on top of an existing Image Marker exhibit (< 0.35m)
+          // Priority: Image Marker > Plane Anchor
+          for (exhibit in filamentEngine.activeExhibits) {
+            val exAnchor = exhibit.anchor
+            if (exAnchor != null) {
+              val dx = exAnchor.pose.tx() - hx
+              val dy = exAnchor.pose.ty() - hy
+              val dz = exAnchor.pose.tz() - hz
+              val dist = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+              if (dist < 0.35f) {
+                DiagnosticsLogger.log(TAG, "Prevented duplicate exhibit: Tap is within ${dist}m of existing '${exhibit.title}'")
+                return
+              }
+            }
+          }
+
           val anchor = arCoreSessionManager.createAnchor(hit)
           if (anchor != null) {
             activeArAnchors.add(anchor)
-            val hitPose = hit.hitPose
-            val posArr = floatArrayOf(hitPose.tx(), hitPose.ty(), hitPose.tz())
+            val posArr = floatArrayOf(hx, hy, hz)
 
             // Spawn as a new distinct scene exhibit on the plane
             val glbBuffer = GltfAssetFactory.getPresetGlbBuffer(currentSelectedModelId)
             if (glbBuffer != null) {
-              val exhibitId = "exhibit_plane_${System.currentTimeMillis()}"
+              val exhibitId = "exhibit_plane_${currentSelectedModelId}_${System.currentTimeMillis()}"
               filamentEngine.spawnExhibit(
                 exhibitId = exhibitId,
                 modelId = currentSelectedModelId,
@@ -554,8 +598,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
             }
 
             onAnchorPlaced?.invoke(anchor, posArr, ExhibitSource.PLANE_TAP, currentSelectedModelId, currentSelectedModelTitle)
-            Log.i(TAG, "ARCore Anchor pinned on plane at: ${hitPose.tx()}, ${hitPose.ty()}, ${hitPose.tz()}")
-            DiagnosticsLogger.log(TAG, "Placed Anchor at (${hitPose.tx()}, ${hitPose.ty()}, ${hitPose.tz()})")
+            Log.i(TAG, "ARCore Anchor pinned on plane at: $hx, $hy, $hz")
+            DiagnosticsLogger.log(TAG, "Placed Anchor at ($hx, $hy, $hz)")
           }
         }
       } catch (e: Exception) {
