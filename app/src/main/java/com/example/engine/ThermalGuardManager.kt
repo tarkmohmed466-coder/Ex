@@ -10,12 +10,14 @@ enum class ThermalQualityLevel(
   val msaaSamples: Int,
   val enableFxaa: Boolean,
   val resolutionScale: Float,
+  val targetFps: Int,
+  val allowHeavyFeatures: Boolean,
   val isThrottled: Boolean
 ) {
-  HIGH("High Quality (Safe)", 2, true, 1.0f, false),
-  MEDIUM("Medium Quality (Moderate Heat)", 1, true, 0.9f, true),
-  LOW("Low Quality (Severe Heat)", 1, false, 0.75f, true),
-  EMERGENCY("Emergency Cooldown", 1, false, 0.5f, true)
+  HIGH("High Quality (Nominal)", 2, true, 1.0f, 60, true, false),
+  MEDIUM("Medium Quality (Moderate Heat)", 1, true, 0.9f, 45, true, true),
+  LOW("Low Quality (Severe Heat)", 1, false, 0.75f, 30, false, true),
+  EMERGENCY("Emergency Cooldown", 1, false, 0.5f, 20, false, true)
 }
 
 /**

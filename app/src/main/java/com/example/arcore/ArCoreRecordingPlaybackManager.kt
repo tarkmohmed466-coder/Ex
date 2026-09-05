@@ -11,18 +11,19 @@ import java.io.File
 /**
  * Production-Grade Google ARCore Recording and Playback Manager.
  * Implements the official ARCore Recording & Playback API:
- * 1. Records live AR session (Camera frames, IMU sensors, 6DoF tracking, depth, metadata) to standard MP4 dataset.
- * 2. Replays recorded AR datasets through ARCore VIO engine as if live camera feed.
- * 3. Supports dataset inspection, pause, resume, and playback progress telemetry.
+ * 1. Records live AR session to standard MP4 dataset (IDLE -> RECORDING -> STOPPED).
+ * 2. Validates and replays recorded AR datasets through ARCore VIO (IDLE -> PLAYING -> FINISHED/ERROR).
+ * 3. Supports dataset inspection, pause, resume, cleanup, and telemetry.
  */
 data class RecordingTelemetry(
   val isRecording: Boolean = false,
   val isPlayingBack: Boolean = false,
-  val recordingStatus: String = "STOPPED",
-  val playbackStatus: String = "NONE",
+  val recordingStatus: String = "IDLE",
+  val playbackStatus: String = "IDLE",
   val datasetFilePath: String? = null,
   val recordedDurationSeconds: Float = 0f,
-  val recordingFileSizeMb: Float = 0f
+  val recordingFileSizeMb: Float = 0f,
+  val errorMessage: String? = null
 )
 
 class ArCoreRecordingPlaybackManager(private val context: Context) {
@@ -58,13 +59,18 @@ class ArCoreRecordingPlaybackManager(private val context: Context) {
         recordingStatus = "RECORDING",
         datasetFilePath = datasetFile.absolutePath,
         recordedDurationSeconds = 0f,
-        recordingFileSizeMb = 0f
+        recordingFileSizeMb = 0f,
+        errorMessage = null
       )
       Log.i(TAG, "ARCore recording started -> ${datasetFile.absolutePath}")
       true
     } catch (e: Exception) {
       Log.e(TAG, "Failed to start ARCore recording: ${e.message}", e)
-      telemetry = telemetry.copy(isRecording = false, recordingStatus = "ERROR: ${e.message}")
+      telemetry = telemetry.copy(
+        isRecording = false,
+        recordingStatus = "ERROR",
+        errorMessage = e.message
+      )
       false
     }
   }
@@ -87,32 +93,99 @@ class ArCoreRecordingPlaybackManager(private val context: Context) {
       recordedFile
     } catch (e: Exception) {
       Log.e(TAG, "Failed to stop ARCore recording: ${e.message}", e)
-      telemetry = telemetry.copy(isRecording = false, recordingStatus = "STOP_FAILED")
+      telemetry = telemetry.copy(
+        isRecording = false,
+        recordingStatus = "ERROR",
+        errorMessage = e.message
+      )
       null
     }
   }
 
   /**
    * Configures ARCore session to replay a recorded MP4 dataset file instead of live camera.
+   * Performs complete file validation before attempting to set dataset.
    * Note: ARCore requires session to be in PAUSED state when setting playback dataset.
    */
   fun setPlaybackDataset(session: Session, datasetFile: File): Boolean {
-    return try {
-      if (!datasetFile.exists() || datasetFile.length() == 0L) {
-        Log.e(TAG, "Playback dataset file does not exist or is empty: ${datasetFile.absolutePath}")
-        return false
-      }
+    // File validation
+    if (!datasetFile.exists()) {
+      val msg = "Dataset file does not exist: ${datasetFile.absolutePath}"
+      Log.e(TAG, msg)
+      telemetry = telemetry.copy(playbackStatus = "ERROR", errorMessage = msg)
+      return false
+    }
+    if (!datasetFile.canRead()) {
+      val msg = "Dataset file is not readable: ${datasetFile.absolutePath}"
+      Log.e(TAG, msg)
+      telemetry = telemetry.copy(playbackStatus = "ERROR", errorMessage = msg)
+      return false
+    }
+    if (datasetFile.length() < 1024) {
+      val msg = "Dataset file is too small or empty (${datasetFile.length()} bytes)"
+      Log.e(TAG, msg)
+      telemetry = telemetry.copy(playbackStatus = "ERROR", errorMessage = msg)
+      return false
+    }
+    if (!datasetFile.name.endsWith(".mp4", ignoreCase = true)) {
+      val msg = "Dataset file is not an MP4 file: ${datasetFile.name}"
+      Log.e(TAG, msg)
+      telemetry = telemetry.copy(playbackStatus = "ERROR", errorMessage = msg)
+      return false
+    }
 
+    return try {
       session.setPlaybackDataset(datasetFile.absolutePath)
       telemetry = telemetry.copy(
         isPlayingBack = true,
-        playbackStatus = "DATASET_SET",
-        datasetFilePath = datasetFile.absolutePath
+        playbackStatus = "PLAYING",
+        datasetFilePath = datasetFile.absolutePath,
+        errorMessage = null
       )
       Log.i(TAG, "ARCore playback dataset configured: ${datasetFile.absolutePath}")
       true
     } catch (e: Exception) {
       Log.e(TAG, "Failed setting playback dataset: ${e.message}", e)
+      telemetry = telemetry.copy(
+        isPlayingBack = false,
+        playbackStatus = "ERROR",
+        errorMessage = e.message
+      )
+      false
+    }
+  }
+
+  /**
+   * Stops playback and returns ARCore session to live camera feed.
+   */
+  fun stopPlayback(session: Session): Boolean {
+    return try {
+      session.setPlaybackDataset(null)
+      telemetry = telemetry.copy(
+        isPlayingBack = false,
+        playbackStatus = "FINISHED",
+        datasetFilePath = null
+      )
+      Log.i(TAG, "ARCore playback stopped. Returned to live camera feed.")
+      true
+    } catch (e: Exception) {
+      Log.e(TAG, "Error stopping playback: ${e.message}", e)
+      false
+    }
+  }
+
+  /**
+   * Deletes a recorded dataset file from cache.
+   */
+  fun deleteDataset(datasetFile: File): Boolean {
+    return try {
+      if (datasetFile.exists()) {
+        datasetFile.delete()
+      } else {
+        true
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to delete dataset file: ${e.message}")
       false
     }
   }
@@ -138,11 +211,26 @@ class ArCoreRecordingPlaybackManager(private val context: Context) {
         it.length().toFloat() / (1024f * 1024f)
       } ?: telemetry.recordingFileSizeMb
 
+      val recLabel = when (recStatus) {
+        RecordingStatus.NONE -> if (telemetry.isRecording) "STOPPED" else "IDLE"
+        RecordingStatus.OK -> "RECORDING"
+        RecordingStatus.IO_ERROR -> "ERROR_IO"
+        else -> recStatus.name
+      }
+
+      val playLabel = when (playStatus) {
+        PlaybackStatus.NONE -> if (telemetry.isPlayingBack) "FINISHED" else "IDLE"
+        PlaybackStatus.OK -> "PLAYING"
+        PlaybackStatus.FINISHED -> "FINISHED"
+        PlaybackStatus.IO_ERROR -> "ERROR_IO"
+        else -> playStatus.name
+      }
+
       telemetry = telemetry.copy(
         isRecording = isCurrentlyRecording,
         isPlayingBack = isCurrentlyPlaying,
-        recordingStatus = recStatus.name,
-        playbackStatus = playStatus.name,
+        recordingStatus = recLabel,
+        playbackStatus = playLabel,
         recordedDurationSeconds = durationSec,
         recordingFileSizeMb = fileSize
       )

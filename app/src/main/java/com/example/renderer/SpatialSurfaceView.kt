@@ -112,6 +112,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
   private val scratchAnchorPoses = mutableListOf<Pose>()
   private val scratchObjPos = FloatArray(3)
   private val scratchCamForward = floatArrayOf(0f, 0f, -1f)
+  private var lastDepthTimeMs: Long = 0L
+  private var lastLodTimeMs: Long = 0L
 
   // Gesture state: seamless finger interaction for Rotate, Move, and Scale
   private var isOneFingerRotateMode: Boolean = false
@@ -320,7 +322,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
     if (!isRendering || !isSurfaceReady) return
 
     try {
-      // Calculate FPS & Telemetry
+      // Calculate FPS & Telemetry once per frame
       frameCount++
       if (lastFrameTimestamp == 0L) lastFrameTimestamp = frameTimeNanos
       val elapsedMs = (frameTimeNanos - fpsTimer) / 1_000_000L
@@ -336,7 +338,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
         )
       }
 
-      frameCount++
+      val nowMs = frameTimeNanos / 1_000_000L
 
       when (displayMode) {
         DisplayMode.OBJECT -> {
@@ -348,7 +350,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
         DisplayMode.AR -> {
           val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
           if (frame != null) {
-            dualCameraGLSurfaceView?.requestRender()
+            dualCameraGLSurfaceView?.updateFromArCoreFrame(frame)
           }
           if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
             frame.camera.getProjectionMatrix(scratchProjMatrix, 0, 0.05f, 50.0f)
@@ -361,8 +363,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
             scratchCamForward[1] = -scratchViewMatrix[6]
             scratchCamForward[2] = -scratchViewMatrix[10]
 
-            // Optimized Depth Occlusion: evaluate every 6 frames (~10fps) to eliminate CPU bottleneck
-            if (frameCount % 6 == 0) {
+            // Time-based Depth Occlusion: evaluate every ~100ms (~10fps) to eliminate CPU bottleneck
+            if (nowMs - lastDepthTimeMs >= 100L) {
+              lastDepthTimeMs = nowMs
               scratchAnchorPoses.clear()
               for (i in 0 until activeArAnchors.size) {
                 val a = activeArAnchors[i]
@@ -373,8 +376,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
               depthOcclusionManager.processFrameDepth(frame, scratchAnchorPoses)
             }
 
-            // Evaluate Dynamic LOD every 6 frames with zero heap allocations
-            if (frameCount % 6 == 0) {
+            // Time-based Dynamic LOD evaluation: every ~150ms with zero heap allocations
+            if (nowMs - lastLodTimeMs >= 150L) {
+              lastLodTimeMs = nowMs
               val camPos = latestTrackingData.cameraPosition
               for (exhibit in filamentEngine.activeExhibits) {
                 val anchor = exhibit.anchor
@@ -402,18 +406,26 @@ class SpatialSurfaceView @JvmOverloads constructor(
             val currentAsset = filamentEngine.currentAsset
             if (currentAsset != null && filamentEngine.activeExhibits.isEmpty()) {
               val primaryAnchor = activeArAnchors.lastOrNull()
-              if (primaryAnchor != null && primaryAnchor.trackingState == TrackingState.TRACKING) {
-                filamentEngine.updateAnchorPose(currentAsset, primaryAnchor.pose)
+              if (primaryAnchor != null) {
+                if (primaryAnchor.trackingState == TrackingState.TRACKING) {
+                  filamentEngine.updateAnchorPose(currentAsset, primaryAnchor.pose)
+                }
+                // When tracking is PAUSED / LOST: freeze world transform, do NOT update unanchored pose
               } else {
+                // Initial placement preview mode before user taps to anchor
                 filamentEngine.updateUnanchoredPose(currentAsset, latestTrackingData.cameraPosition, scratchCamForward)
               }
             }
           } else {
-            // Robust AR Camera with Device Orientation
+            // Robust AR Camera with Device Orientation when AR tracking is uninitialized or lost
             filamentEngine.updateArCamera(sensorPitch, sensorYaw, sensorRoll)
             val currentAsset = filamentEngine.currentAsset
             if (currentAsset != null && filamentEngine.activeExhibits.isEmpty()) {
-              filamentEngine.updateUnanchoredPose(currentAsset, null, scratchCamForward)
+              val primaryAnchor = activeArAnchors.lastOrNull()
+              if (primaryAnchor == null) {
+                filamentEngine.updateUnanchoredPose(currentAsset, null, scratchCamForward)
+              }
+              // If already anchored, freeze in place (do not drag relative to phone camera!)
             }
           }
           filamentEngine.renderFrame(frameTimeNanos)
@@ -422,7 +434,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
         DisplayMode.MR -> {
           val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
           if (frame != null) {
-            dualCameraGLSurfaceView?.requestRender()
+            dualCameraGLSurfaceView?.updateFromArCoreFrame(frame)
           }
           val hasValidTracking = frame != null && frame.camera.trackingState == TrackingState.TRACKING
           if (hasValidTracking) {
@@ -432,8 +444,9 @@ class SpatialSurfaceView @JvmOverloads constructor(
             scratchCamForward[2] = -scratchHeadPoseMatrix[10]
           }
 
-          // Process Depth in MR every 6 frames
-          if (frame != null && frameCount % 6 == 0) {
+          // Process Depth in MR on time-based interval (~100ms)
+          if (frame != null && nowMs - lastDepthTimeMs >= 100L) {
+            lastDepthTimeMs = nowMs
             scratchAnchorPoses.clear()
             for (i in 0 until activeArAnchors.size) {
               val a = activeArAnchors[i]
@@ -451,8 +464,11 @@ class SpatialSurfaceView @JvmOverloads constructor(
           val currentAsset = filamentEngine.currentAsset
           if (currentAsset != null && filamentEngine.activeExhibits.isEmpty()) {
             val primaryAnchor = activeArAnchors.lastOrNull()
-            if (primaryAnchor != null && primaryAnchor.trackingState == TrackingState.TRACKING) {
-              filamentEngine.updateAnchorPose(currentAsset, primaryAnchor.pose)
+            if (primaryAnchor != null) {
+              if (primaryAnchor.trackingState == TrackingState.TRACKING) {
+                filamentEngine.updateAnchorPose(currentAsset, primaryAnchor.pose)
+              }
+              // Freeze when tracking lost
             } else {
               filamentEngine.updateUnanchoredPose(currentAsset, latestTrackingData.cameraPosition, scratchCamForward)
             }

@@ -1,8 +1,11 @@
 package com.example.arcore
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.google.ar.core.Anchor
+import com.google.ar.core.Config
 import com.google.ar.core.Pose
 import com.google.ar.core.Session
 import java.util.UUID
@@ -11,20 +14,24 @@ import java.util.UUID
  * Cloud Anchor Lifecycle State Machine according to official Google ARCore specification.
  */
 enum class CloudAnchorLifecycleState {
-  NONE,
+  NOT_HOSTED,
   HOSTING_IN_PROGRESS,
   HOSTED_SUCCESS,
+  NOT_RESOLVED,
   RESOLVING_IN_PROGRESS,
   RESOLVED_SUCCESS,
   ERROR_NOT_AUTHORIZED,
   ERROR_RESOURCE_EXHAUSTED,
+  ERROR_HOSTING_DATASET_PROCESSING_FAILED,
+  ERROR_CLOUD_ANCHORS_NOT_CONFIGURED,
   ERROR_LOCALIZATION_FAILED,
   ERROR_TIMEOUT,
+  ERROR_CANCELLED,
   ERROR_SDK_UNSUPPORTED
 }
 
 /**
- * Shared Spatial AR State synchronized between host and client devices.
+ * Shared Spatial AR State synchronized between host and client devices (Decoupled Multiplayer Layer).
  */
 data class SharedSpatialExhibit(
   val sessionCode: String,
@@ -48,20 +55,25 @@ data class CloudAnchorRecord(
 )
 
 /**
- * Production-Grade ARCore Cloud Anchors & Shared Spatial Content Manager.
- * Implements end-to-end workflow:
- * Create -> Host -> Cloud ID -> Local Cache / Share -> Resolve -> Retry & Recovery -> Synchronize State.
+ * Production-Grade ARCore Cloud Anchors Manager.
+ * Features:
+ * 1. Full lifecycle state tracking (NOT_HOSTED -> HOSTING -> HOSTED / ERROR).
+ * 2. Timeout protection and explicit cancellation.
+ * 3. Granular error reporting.
+ * 4. Standalone operation decoupled from multiplayer sessions.
  */
 class CloudAnchorManager(context: Context? = null) {
 
   companion object {
     private const val TAG = "CloudAnchorManager"
-    private const val MAX_RESOLVE_RETRIES = 3
+    private const val DEFAULT_TIMEOUT_MS = 30000L
     private const val PREFS_NAME = "arcore_cloud_anchors_cache"
   }
 
+  private val mainHandler = Handler(Looper.getMainLooper())
   private val sharedPrefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
   private val activeRecords = mutableMapOf<String, CloudAnchorRecord>()
+  private val pendingTimeouts = mutableMapOf<String, Runnable>()
 
   var activeSharedExhibit: SharedSpatialExhibit? = null
     private set
@@ -70,36 +82,66 @@ class CloudAnchorManager(context: Context? = null) {
     get() = activeRecords.size
 
   /**
-   * Hosts a local ARCore Anchor into Google Cloud AR Services.
+   * Standalone Cloud Anchor Hosting.
+   * Works purely with the local anchor without requiring multiplayer or matchmaking.
    */
   fun hostCloudAnchor(
     session: Session,
     localAnchor: Anchor,
-    sessionCode: String = "EXHIBIT-${(1000..9999).random()}",
-    modelId: String = "primary_exhibit_model",
-    modelScale: Float = 1.0f,
     ttlDays: Int = 1,
+    timeoutMs: Long = DEFAULT_TIMEOUT_MS,
     onStatusChange: (CloudAnchorRecord) -> Unit
-  ) {
-    val tempId = "pending_${UUID.randomUUID()}"
+  ): String {
+    // Check if Cloud Anchors mode is configured in session
+    if (session.config.cloudAnchorMode == Config.CloudAnchorMode.DISABLED) {
+      val record = CloudAnchorRecord(
+        cloudAnchorId = "unconfigured",
+        anchor = localAnchor,
+        state = CloudAnchorLifecycleState.ERROR_CLOUD_ANCHORS_NOT_CONFIGURED,
+        errorMessage = "CloudAnchorMode is DISABLED in ARCore Session configuration."
+      )
+      onStatusChange(record)
+      return "unconfigured"
+    }
+
+    val operationId = "host_${UUID.randomUUID()}"
     val initialRecord = CloudAnchorRecord(
-      cloudAnchorId = tempId,
+      cloudAnchorId = operationId,
       anchor = localAnchor,
       state = CloudAnchorLifecycleState.HOSTING_IN_PROGRESS,
       ttlDays = ttlDays
     )
-    activeRecords[tempId] = initialRecord
+    activeRecords[operationId] = initialRecord
     onStatusChange(initialRecord)
+
+    // Schedule timeout
+    val timeoutRunnable = Runnable {
+      val cur = activeRecords[operationId]
+      if (cur != null && cur.state == CloudAnchorLifecycleState.HOSTING_IN_PROGRESS) {
+        val timedOut = cur.copy(
+          state = CloudAnchorLifecycleState.ERROR_TIMEOUT,
+          errorMessage = "Cloud Anchor hosting timed out after ${timeoutMs / 1000}s."
+        )
+        activeRecords[operationId] = timedOut
+        onStatusChange(timedOut)
+        Log.w(TAG, "Hosting timed out for operation $operationId")
+      }
+    }
+    pendingTimeouts[operationId] = timeoutRunnable
+    mainHandler.postDelayed(timeoutRunnable, timeoutMs)
 
     try {
       session.hostCloudAnchorAsync(localAnchor, ttlDays) { cloudAnchorId, state ->
+        // Cancel timeout
+        pendingTimeouts.remove(operationId)?.let { mainHandler.removeCallbacks(it) }
+
         val stateName = state.name
         Log.i(TAG, "ARCore Cloud Anchor Host callback: state=$stateName, id=$cloudAnchorId")
 
         when (state) {
           Anchor.CloudAnchorState.SUCCESS -> {
-            if (cloudAnchorId != null) {
-              activeRecords.remove(tempId)
+            if (!cloudAnchorId.isNullOrEmpty()) {
+              activeRecords.remove(operationId)
               val record = CloudAnchorRecord(
                 cloudAnchorId = cloudAnchorId,
                 anchor = localAnchor,
@@ -107,23 +149,13 @@ class CloudAnchorManager(context: Context? = null) {
                 ttlDays = ttlDays
               )
               activeRecords[cloudAnchorId] = record
-
-              // Persist anchor ID locally
-              sharedPrefs?.edit()?.putString(sessionCode, cloudAnchorId)?.apply()
-
-              // Create shared spatial session payload
-              val pose = localAnchor.pose
-              activeSharedExhibit = SharedSpatialExhibit(
-                sessionCode = sessionCode,
-                cloudAnchorId = cloudAnchorId,
-                hostDeviceId = "${android.os.Build.MANUFACTURER}_${android.os.Build.MODEL}",
-                modelId = modelId,
-                modelScale = modelScale,
-                poseTranslation = floatArrayOf(pose.tx(), pose.ty(), pose.tz()),
-                poseRotation = floatArrayOf(pose.qx(), pose.qy(), pose.qz(), pose.qw()),
-                syncTimestampMs = System.currentTimeMillis()
+              onStatusChange(record)
+            } else {
+              val record = initialRecord.copy(
+                state = CloudAnchorLifecycleState.ERROR_LOCALIZATION_FAILED,
+                errorMessage = "Host succeeded but cloudAnchorId was null or empty."
               )
-
+              activeRecords[operationId] = record
               onStatusChange(record)
             }
           }
@@ -132,57 +164,98 @@ class CloudAnchorManager(context: Context? = null) {
               state = CloudAnchorLifecycleState.ERROR_NOT_AUTHORIZED,
               errorMessage = "Google Cloud API key unauthorized for ARCore Cloud Anchors."
             )
-            activeRecords[tempId] = record
+            activeRecords[operationId] = record
             onStatusChange(record)
           }
           Anchor.CloudAnchorState.ERROR_RESOURCE_EXHAUSTED -> {
             val record = initialRecord.copy(
               state = CloudAnchorLifecycleState.ERROR_RESOURCE_EXHAUSTED,
-              errorMessage = "ARCore Cloud Anchor quota exceeded."
+              errorMessage = "ARCore Cloud Anchor API quota exceeded."
             )
-            activeRecords[tempId] = record
+            activeRecords[operationId] = record
+            onStatusChange(record)
+          }
+          Anchor.CloudAnchorState.ERROR_HOSTING_DATASET_PROCESSING_FAILED -> {
+            val record = initialRecord.copy(
+              state = CloudAnchorLifecycleState.ERROR_HOSTING_DATASET_PROCESSING_FAILED,
+              errorMessage = "Insufficient visual features in environment to host Cloud Anchor."
+            )
+            activeRecords[operationId] = record
             onStatusChange(record)
           }
           else -> {
             val record = initialRecord.copy(
               state = CloudAnchorLifecycleState.ERROR_LOCALIZATION_FAILED,
-              errorMessage = "Failed to host anchor: $stateName"
+              errorMessage = "Hosting failed: $stateName"
             )
-            activeRecords[tempId] = record
+            activeRecords[operationId] = record
             onStatusChange(record)
           }
         }
       }
     } catch (e: Exception) {
+      pendingTimeouts.remove(operationId)?.let { mainHandler.removeCallbacks(it) }
       Log.e(TAG, "Exception initiating hostCloudAnchor: ${e.message}", e)
       val errRecord = initialRecord.copy(
         state = CloudAnchorLifecycleState.ERROR_SDK_UNSUPPORTED,
         errorMessage = e.message
       )
+      activeRecords[operationId] = errRecord
       onStatusChange(errRecord)
     }
+
+    return operationId
   }
 
   /**
-   * Resolves a shared Cloud Anchor using its persistent Cloud Anchor ID or session code.
+   * Standalone Cloud Anchor Resolving.
+   * Resolves an anchor purely from its cloudAnchorId without requiring multiplayer matchmaking.
    */
   fun resolveCloudAnchor(
     session: Session,
     cloudAnchorId: String,
-    retryCount: Int = 0,
+    timeoutMs: Long = DEFAULT_TIMEOUT_MS,
     onStatusChange: (CloudAnchorRecord) -> Unit
-  ) {
+  ): String {
+    if (session.config.cloudAnchorMode == Config.CloudAnchorMode.DISABLED) {
+      val record = CloudAnchorRecord(
+        cloudAnchorId = cloudAnchorId,
+        anchor = null,
+        state = CloudAnchorLifecycleState.ERROR_CLOUD_ANCHORS_NOT_CONFIGURED,
+        errorMessage = "CloudAnchorMode is DISABLED in ARCore Session configuration."
+      )
+      onStatusChange(record)
+      return cloudAnchorId
+    }
+
     val initialRecord = CloudAnchorRecord(
       cloudAnchorId = cloudAnchorId,
       anchor = null,
-      state = CloudAnchorLifecycleState.RESOLVING_IN_PROGRESS,
-      retryCount = retryCount
+      state = CloudAnchorLifecycleState.RESOLVING_IN_PROGRESS
     )
     activeRecords[cloudAnchorId] = initialRecord
     onStatusChange(initialRecord)
 
+    // Schedule timeout
+    val timeoutRunnable = Runnable {
+      val cur = activeRecords[cloudAnchorId]
+      if (cur != null && cur.state == CloudAnchorLifecycleState.RESOLVING_IN_PROGRESS) {
+        val timedOut = cur.copy(
+          state = CloudAnchorLifecycleState.ERROR_TIMEOUT,
+          errorMessage = "Cloud Anchor resolving timed out after ${timeoutMs / 1000}s."
+        )
+        activeRecords[cloudAnchorId] = timedOut
+        onStatusChange(timedOut)
+        Log.w(TAG, "Resolving timed out for anchor $cloudAnchorId")
+      }
+    }
+    pendingTimeouts[cloudAnchorId] = timeoutRunnable
+    mainHandler.postDelayed(timeoutRunnable, timeoutMs)
+
     try {
       session.resolveCloudAnchorAsync(cloudAnchorId) { anchor, state ->
+        pendingTimeouts.remove(cloudAnchorId)?.let { mainHandler.removeCallbacks(it) }
+
         val stateName = state.name
         Log.i(TAG, "ARCore Cloud Anchor Resolve callback: state=$stateName, id=$cloudAnchorId")
 
@@ -191,31 +264,31 @@ class CloudAnchorManager(context: Context? = null) {
             val successRecord = CloudAnchorRecord(
               cloudAnchorId = cloudAnchorId,
               anchor = anchor,
-              state = CloudAnchorLifecycleState.RESOLVED_SUCCESS,
-              retryCount = retryCount
+              state = CloudAnchorLifecycleState.RESOLVED_SUCCESS
             )
             activeRecords[cloudAnchorId] = successRecord
             onStatusChange(successRecord)
           }
+          Anchor.CloudAnchorState.ERROR_NOT_AUTHORIZED -> {
+            val failRecord = initialRecord.copy(
+              state = CloudAnchorLifecycleState.ERROR_NOT_AUTHORIZED,
+              errorMessage = "Google Cloud API key unauthorized for ARCore Cloud Anchors."
+            )
+            activeRecords[cloudAnchorId] = failRecord
+            onStatusChange(failRecord)
+          }
           Anchor.CloudAnchorState.ERROR_RESOLVING_LOCALIZATION_NO_MATCH -> {
-            if (retryCount < MAX_RESOLVE_RETRIES) {
-              Log.w(TAG, "Localization no match. Retrying resolve in 2s (attempt ${retryCount + 1})...")
-              android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                resolveCloudAnchor(session, cloudAnchorId, retryCount + 1, onStatusChange)
-              }, 2000L)
-            } else {
-              val failRecord = initialRecord.copy(
-                state = CloudAnchorLifecycleState.ERROR_LOCALIZATION_FAILED,
-                errorMessage = "Could not resolve physical room feature matching after $MAX_RESOLVE_RETRIES attempts."
-              )
-              activeRecords[cloudAnchorId] = failRecord
-              onStatusChange(failRecord)
-            }
+            val failRecord = initialRecord.copy(
+              state = CloudAnchorLifecycleState.ERROR_LOCALIZATION_FAILED,
+              errorMessage = "Current camera view does not match the visual features of this Cloud Anchor."
+            )
+            activeRecords[cloudAnchorId] = failRecord
+            onStatusChange(failRecord)
           }
           else -> {
             val failRecord = initialRecord.copy(
               state = CloudAnchorLifecycleState.ERROR_LOCALIZATION_FAILED,
-              errorMessage = "Failed to resolve anchor: $stateName"
+              errorMessage = "Resolving failed: $stateName"
             )
             activeRecords[cloudAnchorId] = failRecord
             onStatusChange(failRecord)
@@ -223,13 +296,54 @@ class CloudAnchorManager(context: Context? = null) {
         }
       }
     } catch (e: Exception) {
+      pendingTimeouts.remove(cloudAnchorId)?.let { mainHandler.removeCallbacks(it) }
       Log.e(TAG, "Exception resolving cloud anchor: ${e.message}", e)
       val errRecord = initialRecord.copy(
         state = CloudAnchorLifecycleState.ERROR_SDK_UNSUPPORTED,
         errorMessage = e.message
       )
+      activeRecords[cloudAnchorId] = errRecord
       onStatusChange(errRecord)
     }
+
+    return cloudAnchorId
+  }
+
+  /**
+   * Cancels an ongoing hosting or resolving operation.
+   */
+  fun cancelOperation(operationOrAnchorId: String) {
+    pendingTimeouts.remove(operationOrAnchorId)?.let { mainHandler.removeCallbacks(it) }
+    val record = activeRecords[operationOrAnchorId]
+    if (record != null) {
+      activeRecords[operationOrAnchorId] = record.copy(
+        state = CloudAnchorLifecycleState.ERROR_CANCELLED,
+        errorMessage = "Operation cancelled by user."
+      )
+    }
+  }
+
+  /**
+   * Optional Multi-User Shared AR helper (Decoupled from core Cloud Anchor hosting/resolving).
+   */
+  fun attachSharedExhibitMetadata(
+    sessionCode: String,
+    cloudAnchorId: String,
+    modelId: String,
+    modelScale: Float,
+    pose: Pose
+  ) {
+    sharedPrefs?.edit()?.putString(sessionCode, cloudAnchorId)?.apply()
+    activeSharedExhibit = SharedSpatialExhibit(
+      sessionCode = sessionCode,
+      cloudAnchorId = cloudAnchorId,
+      hostDeviceId = "${android.os.Build.MANUFACTURER}_${android.os.Build.MODEL}",
+      modelId = modelId,
+      modelScale = modelScale,
+      poseTranslation = floatArrayOf(pose.tx(), pose.ty(), pose.tz()),
+      poseRotation = floatArrayOf(pose.qx(), pose.qy(), pose.qz(), pose.qw()),
+      syncTimestampMs = System.currentTimeMillis()
+    )
   }
 
   fun getCachedAnchorId(sessionCode: String): String? {
@@ -237,6 +351,8 @@ class CloudAnchorManager(context: Context? = null) {
   }
 
   fun clearAll() {
+    pendingTimeouts.values.forEach { mainHandler.removeCallbacks(it) }
+    pendingTimeouts.clear()
     activeRecords.values.forEach { it.anchor?.detach() }
     activeRecords.clear()
     activeSharedExhibit = null

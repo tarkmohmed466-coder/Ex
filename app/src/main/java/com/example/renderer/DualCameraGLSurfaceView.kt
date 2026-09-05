@@ -85,12 +85,20 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
 
   private val vertexBuffer: FloatBuffer
   private val texBuffer: FloatBuffer
+  private val scratchQuadCoords = floatArrayOf(
+    -1.0f, -1.0f,
+     1.0f, -1.0f,
+    -1.0f,  1.0f,
+     1.0f,  1.0f
+  )
+  private val scratchTexCoords = FloatArray(8)
 
   init {
     setEGLContextClientVersion(2)
     setPreserveEGLContextOnPause(true)
     setRenderer(this)
     renderMode = RENDERMODE_WHEN_DIRTY
+    android.opengl.Matrix.setIdentityM(texMatrix, 0)
 
     val quadCoords = floatArrayOf(
       -1.0f, -1.0f,
@@ -120,6 +128,27 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
         put(texCoords)
         position(0)
       }
+  }
+
+  /**
+   * Transforms camera texture coordinates directly from current ARCore frame.
+   * Ensures zero aspect-ratio distortion and exact rotation alignment without black borders.
+   */
+  fun updateFromArCoreFrame(frame: com.google.ar.core.Frame) {
+    try {
+      frame.transformCoordinates2d(
+        com.google.ar.core.Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+        scratchQuadCoords,
+        com.google.ar.core.Coordinates2d.TEXTURE_NORMALIZED,
+        scratchTexCoords
+      )
+      texBuffer.position(0)
+      texBuffer.put(scratchTexCoords)
+      texBuffer.position(0)
+      requestRender()
+    } catch (e: Exception) {
+      requestRender()
+    }
   }
 
   fun provideSurface(request: SurfaceRequest, exec: Executor) {

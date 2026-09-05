@@ -283,7 +283,7 @@ class ArCoreSessionManager(private val context: Context) {
           }
 
           // Configure Geospatial API & Streetscape Geometry
-          geospatialManager.configureGeospatialMode(newSession, config)
+          geospatialManager.configureGeospatialMode(context, newSession, config)
 
           // Configure Scene Semantics Mode
           semanticsManager.configureSemanticsMode(newSession, config)
@@ -649,6 +649,35 @@ class ArCoreSessionManager(private val context: Context) {
   }
 
   fun createAnchorForAugmentedImage(image: AugmentedImage): Anchor? = createAnchorFromImage(image)
+
+  fun switchCameraFacing(isFrontFaceTracking: Boolean): Boolean {
+    val s = session ?: return false
+    return try {
+      s.pause()
+      val config = s.config
+      val success = if (isFrontFaceTracking) {
+        val frontOk = facesManager.selectFrontCameraConfig(s)
+        if (frontOk) {
+          facesManager.configureFaceMode(s, config, true)
+          config.planeFindingMode = Config.PlaneFindingMode.DISABLED
+        }
+        frontOk
+      } else {
+        facesManager.configureFaceMode(s, config, false)
+        facesManager.selectBackCameraConfig(s)
+        config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+        true
+      }
+      s.configure(config)
+      s.resume()
+      Log.i(TAG, "Switched camera facing (isFront=$isFrontFaceTracking, success=$success)")
+      success
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed switching camera facing: ${e.message}", e)
+      try { s.resume() } catch (_: Throwable) {}
+      false
+    }
+  }
 
   fun resetWalkingOrigin() {
     initialCameraPose = null

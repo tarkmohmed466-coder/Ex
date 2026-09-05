@@ -1,6 +1,10 @@
 package com.example.arcore
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Earth
@@ -13,12 +17,15 @@ import com.google.ar.core.VpsAvailability
 /**
  * Production-Grade Google ARCore Geospatial, VPS & Earth Localization Manager.
  * 1. Configures Earth VPS localization and checks availability worldwide.
- * 2. Provides WGS84 global latitude, longitude, altitude, and heading pose.
- * 3. Anchors 3D models to real-world global geographic coordinates (Terrain & Geospatial anchors).
- * 4. Tracks Streetscape Geometry (buildings, terrain meshes) for outdoor occlusion and physics.
+ * 2. Checks fine location permissions before initializing Earth.
+ * 3. Accurately reports separate Earth Tracking State and VPS Availability.
+ * 4. Provides WGS84 global latitude, longitude, altitude, and heading pose.
+ * 5. Anchors 3D models to real-world global geographic coordinates (Terrain & Geospatial anchors).
+ * 6. Tracks Streetscape Geometry (buildings, terrain meshes) for outdoor occlusion and physics.
  */
 data class GeospatialStatus(
   val isSupported: Boolean = false,
+  val locationPermissionGranted: Boolean = false,
   val earthState: String = "DISABLED",
   val trackingState: String = "STOPPED",
   val vpsAvailability: String = "UNKNOWN",
@@ -36,27 +43,56 @@ class ArCoreGeospatialManager {
 
   companion object {
     private const val TAG = "ArCoreGeospatialManager"
+    private const val VPS_CHECK_INTERVAL_MS = 4000L
   }
 
   var status: GeospatialStatus = GeospatialStatus()
     private set
 
   private val geospatialAnchors = mutableListOf<Anchor>()
+  private var lastVpsCheckMs: Long = 0L
+  private var isVpsCheckPending: Boolean = false
 
   /**
    * Configures Geospatial mode in ARCore Session configuration.
+   * Checks ACCESS_FINE_LOCATION before enabling Geospatial mode.
    */
-  fun configureGeospatialMode(session: Session, config: Config): Boolean {
+  fun configureGeospatialMode(context: Context, session: Session, config: Config): Boolean {
+    val hasFineLocation = ContextCompat.checkSelfPermission(
+      context,
+      Manifest.permission.ACCESS_FINE_LOCATION
+    ) == PackageManager.PERMISSION_GRANTED
+
+    if (!hasFineLocation) {
+      config.geospatialMode = Config.GeospatialMode.DISABLED
+      status = status.copy(
+        isSupported = false,
+        locationPermissionGranted = false,
+        earthState = "LOCATION_PERMISSION_DENIED",
+        vpsAvailability = "UNAVAILABLE"
+      )
+      Log.w(TAG, "Geospatial API requires ACCESS_FINE_LOCATION permission. Kept disabled.")
+      return false
+    }
+
     return try {
       if (session.isGeospatialModeSupported(Config.GeospatialMode.ENABLED)) {
         config.geospatialMode = Config.GeospatialMode.ENABLED
         config.streetscapeGeometryMode = Config.StreetscapeGeometryMode.ENABLED
-        status = status.copy(isSupported = true, earthState = "ENABLED")
+        status = status.copy(
+          isSupported = true,
+          locationPermissionGranted = true,
+          earthState = "ENABLED"
+        )
         Log.i(TAG, "ARCore Geospatial API & Streetscape Geometry configured.")
         true
       } else {
         config.geospatialMode = Config.GeospatialMode.DISABLED
-        status = status.copy(isSupported = false, earthState = "UNSUPPORTED")
+        status = status.copy(
+          isSupported = false,
+          locationPermissionGranted = true,
+          earthState = "UNSUPPORTED"
+        )
         Log.i(TAG, "ARCore Geospatial mode unsupported on this device.")
         false
       }
@@ -68,6 +104,7 @@ class ArCoreGeospatialManager {
 
   /**
    * Updates Earth localization and VPS telemetry from current ARCore session.
+   * Separates Earth Tracking State from VPS Availability.
    */
   fun updateGeospatialState(session: Session) {
     val earth = session.earth ?: return
@@ -83,11 +120,29 @@ class ArCoreGeospatialManager {
           session.getAllTrackables(StreetscapeGeometry::class.java).size
         } catch (_: Throwable) { 0 }
 
-        status = GeospatialStatus(
+        // Query real VPS availability asynchronously without blocking or making false assumptions
+        val now = System.currentTimeMillis()
+        if (!isVpsCheckPending && (now - lastVpsCheckMs > VPS_CHECK_INTERVAL_MS)) {
+          isVpsCheckPending = true
+          lastVpsCheckMs = now
+          try {
+            session.checkVpsAvailabilityAsync(
+              cameraGeospatialPose.latitude,
+              cameraGeospatialPose.longitude
+            ) { availability ->
+              isVpsCheckPending = false
+              status = status.copy(vpsAvailability = availability.name)
+            }
+          } catch (e: Exception) {
+            isVpsCheckPending = false
+            status = status.copy(vpsAvailability = "ERROR_NETWORK")
+          }
+        }
+
+        status = status.copy(
           isSupported = true,
-          earthState = "TRACKING_VPS_ALIGNED",
+          earthState = "EARTH_TRACKING",
           trackingState = trackingName,
-          vpsAvailability = "VPS_AVAILABLE",
           latitude = cameraGeospatialPose.latitude,
           longitude = cameraGeospatialPose.longitude,
           altitudeMeters = cameraGeospatialPose.altitude,
@@ -100,7 +155,7 @@ class ArCoreGeospatialManager {
       } else {
         status = status.copy(
           trackingState = trackingName,
-          earthState = "ACQUIRING_VPS_POSE"
+          earthState = if (earthTracking == TrackingState.PAUSED) "EARTH_PAUSED" else "EARTH_STOPPED"
         )
       }
     } catch (e: Exception) {

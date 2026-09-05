@@ -59,56 +59,46 @@ object ArCoreDeviceMatrix {
     val manufacturer = Build.MANUFACTURER ?: "Unknown"
     val fullDeviceName = "${manufacturer.lowercase()} ${model.lowercase()}"
 
-    val isTierA = KNOWN_TIER_A_DEVICES.any { fullDeviceName.contains(it) }
-    val isTierB = KNOWN_TIER_B_DEVICES.any { fullDeviceName.contains(it) }
-
-    val tier = when {
-      isTierA -> "TIER_A_FLAGSHIP"
-      isTierB -> "TIER_B_MAINSTREAM"
-      else -> "TIER_C_STANDARD"
-    }
-
-    // Dynamic runtime capability detection via ARCore session when available
+    // Real runtime capability detection strictly via ARCore session APIs
     val depthSupported = session?.let {
       try {
         it.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
       } catch (_: Throwable) { false }
-    } ?: isTierA
+    } ?: false
 
     val rawDepthSupported = session?.let {
       try {
         it.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)
       } catch (_: Throwable) { false }
-    } ?: isTierA
+    } ?: false
 
     val geospatialSupported = session?.let {
       try {
         it.isGeospatialModeSupported(Config.GeospatialMode.ENABLED)
       } catch (_: Throwable) { false }
-    } ?: (isTierA || isTierB)
+    } ?: false
 
     val semanticsSupported = session?.let {
       try {
         it.isSemanticModeSupported(Config.SemanticMode.ENABLED)
       } catch (_: Throwable) { false }
-    } ?: isTierA
+    } ?: false
 
-    val streetscapeSupported = session?.let {
-      try {
-        it.isGeospatialModeSupported(Config.GeospatialMode.ENABLED)
-      } catch (_: Throwable) { false }
-    } ?: isTierA
+    val streetscapeSupported = geospatialSupported
 
     val instantPlacementSupported = session?.let {
       try {
-        val testConfig = it.config
+        val testConfig = Config(it)
         testConfig.instantPlacementMode = Config.InstantPlacementMode.LOCAL_Y_UP
         it.isSupported(testConfig)
-      } catch (_: Throwable) {
-        // Fallback check: modern flagships support instant placement
-        isTierA || isTierB
-      }
-    } ?: (isTierA || isTierB)
+      } catch (_: Throwable) { false }
+    } ?: false
+
+    val imageStabilizationSupported = session?.let {
+      try {
+        it.isImageStabilizationModeSupported(Config.ImageStabilizationMode.EIS)
+      } catch (_: Throwable) { false }
+    } ?: false
 
     // Check front camera support for 3D Face Mesh tracking
     val facesSupported = session?.let {
@@ -119,12 +109,32 @@ object ArCoreDeviceMatrix {
       } catch (_: Throwable) { false }
     } ?: false
 
-    val cloudAnchorsSupported = (session != null) && (isTierA || isTierB)
+    val cloudAnchorsSupported = session?.let {
+      try {
+        val testConfig = Config(it)
+        testConfig.cloudAnchorMode = Config.CloudAnchorMode.ENABLED
+        it.isSupported(testConfig)
+      } catch (_: Throwable) { false }
+    } ?: false
+
+    // Derive tier purely from verified runtime capabilities
+    val tier = when {
+      session == null -> "UNVERIFIED"
+      depthSupported && semanticsSupported && geospatialSupported -> "TIER_A_ADVANCED_AR"
+      depthSupported || semanticsSupported -> "TIER_B_DEPTH_ENABLED"
+      else -> "TIER_C_BASIC_6DOF"
+    }
+
+    val recommendedQuality = when {
+      depthSupported && semanticsSupported -> "HIGH_FIDELITY_ULTRA"
+      depthSupported -> "BALANCED_HIGH"
+      else -> "PERFORMANCE_STANDARD"
+    }
 
     val certification = DeviceCapabilityCertification(
       deviceModel = model,
       manufacturer = manufacturer,
-      isCertifiedArCoreDevice = isTierA || isTierB || session != null,
+      isCertifiedArCoreDevice = session != null,
       certificationTier = tier,
       supportsDepthApi = depthSupported,
       supportsRawDepth = rawDepthSupported,
@@ -134,7 +144,7 @@ object ArCoreDeviceMatrix {
       supportsAugmentedFaces = facesSupported,
       supportsStreetscapeGeometry = streetscapeSupported,
       supportsCloudAnchors = cloudAnchorsSupported,
-      recommendedQualityTier = if (isTierA) "HIGH_FIDELITY_ULTRA" else "BALANCED"
+      recommendedQualityTier = recommendedQuality
     )
 
     Log.i(TAG, "Device Matrix Certification: $tier (Depth=$depthSupported, Semantics=$semanticsSupported, Geospatial=$geospatialSupported)")

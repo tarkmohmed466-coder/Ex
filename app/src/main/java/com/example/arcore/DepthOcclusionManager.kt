@@ -63,8 +63,15 @@ class DepthOcclusionManager {
     private set
   var maxDepthMeters: Float = 0f
     private set
-  var depthConfidenceScore: Float = 95f
+  var depthCoveragePercentage: Float = 0f
     private set
+  var isConfidenceAvailable: Boolean = false
+    private set
+  var depthConfidencePercentage: Float? = null
+    private set
+  // Legacy score field maintained for backward compatibility (returns actual confidence if available, else coverage)
+  val depthConfidenceScore: Float
+    get() = depthConfidencePercentage ?: depthCoveragePercentage
 
   /**
    * Initializes the OpenGL 2D texture used to feed depth data to GPU shaders.
@@ -179,13 +186,50 @@ class DepthOcclusionManager {
         isDepthTextureReady = true
       }
 
-      // Compute depth confidence score
+      // Compute actual physical depth coverage percentage
       val totalExpected = width * height
-      val coveragePct = if (totalExpected > 0) (validCount.toFloat() / totalExpected) * 100f else 0f
-      depthConfidenceScore = (coveragePct * 0.4f + 60f).coerceIn(40f, 99f)
+      depthCoveragePercentage = if (totalExpected > 0) (validCount.toFloat() / totalExpected) * 100f else 0f
 
-      // Per-pixel occlusion validation for virtual anchors
+      // Query real ARCore depth confidence image if supported by hardware
+      var confidenceImage: Image? = null
+      try {
+        confidenceImage = frame.acquireRawDepthConfidenceImage()
+        val confPlanes = confidenceImage.planes
+        if (confPlanes.isNotEmpty()) {
+          val confBuffer = confPlanes[0].buffer
+          var confSum = 0L
+          var confSamples = 0
+          val limit = confBuffer.limit()
+          val step = maxOf(1, limit / 1000)
+          var idx = 0
+          while (idx < limit) {
+            val c = confBuffer.get(idx).toInt() and 0xFF
+            confSum += c
+            confSamples++
+            idx += step
+          }
+          if (confSamples > 0) {
+            val meanConf = confSum.toFloat() / confSamples
+            depthConfidencePercentage = (meanConf / 255f) * 100f
+            isConfidenceAvailable = true
+          } else {
+            depthConfidencePercentage = null
+            isConfidenceAvailable = false
+          }
+        } else {
+          depthConfidencePercentage = null
+          isConfidenceAvailable = false
+        }
+      } catch (_: Throwable) {
+        depthConfidencePercentage = null
+        isConfidenceAvailable = false
+      } finally {
+        confidenceImage?.close()
+      }
+
+      // Multi-point per-pixel occlusion validation for virtual anchors
       var occludedCount = 0
+      var totalTestedPoints = 0
       for (anchorPose in virtualAnchorPoses) {
         val virtualDistMeters = Math.sqrt(
           (anchorPose.tx() * anchorPose.tx() +
@@ -193,19 +237,28 @@ class DepthOcclusionManager {
            anchorPose.tz() * anchorPose.tz()).toDouble()
         ).toFloat()
 
-        // Test center pixel occlusion
-        val isOccluded = isPixelOccluded(
-          frame = frame,
-          viewX = 0.5f,
-          viewY = 0.5f,
-          virtualDepthMeters = virtualDistMeters
+        val samplePoints = arrayOf(
+          0.5f to 0.5f,
+          0.47f to 0.47f,
+          0.53f to 0.53f,
+          0.47f to 0.53f,
+          0.53f to 0.47f
         )
-        if (isOccluded) occludedCount++
+        for ((sx, sy) in samplePoints) {
+          totalTestedPoints++
+          val isOccluded = isPixelOccluded(
+            frame = frame,
+            viewX = sx,
+            viewY = sy,
+            virtualDepthMeters = virtualDistMeters
+          )
+          if (isOccluded) occludedCount++
+        }
       }
 
       isOcclusionDetected = occludedCount > 0
-      occlusionPercentage = if (virtualAnchorPoses.isNotEmpty()) {
-        (occludedCount.toFloat() / virtualAnchorPoses.size) * 100f
+      occlusionPercentage = if (totalTestedPoints > 0) {
+        (occludedCount.toFloat() / totalTestedPoints) * 100f
       } else {
         0f
       }
