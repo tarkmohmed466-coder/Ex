@@ -288,6 +288,9 @@ class ArCoreSessionManager(private val context: Context) {
           // Configure Scene Semantics Mode
           semanticsManager.configureSemanticsMode(newSession, config)
 
+          // Configure Cloud Anchors Mode
+          cloudAnchorManager.configureCloudAnchorMode(newSession, config)
+
           // Certify hardware against ARCore capability matrix
           deviceCertification = ArCoreDeviceMatrix.certifyDevice(context, newSession)
 
@@ -656,19 +659,22 @@ class ArCoreSessionManager(private val context: Context) {
       s.pause()
       val config = s.config
       val success = if (isFrontFaceTracking) {
-        val frontOk = facesManager.selectFrontCameraConfig(s)
-        if (frontOk) {
-          facesManager.configureFaceMode(s, config, true)
-          config.planeFindingMode = Config.PlaneFindingMode.DISABLED
-        }
-        frontOk
+        // Front-camera face tracking requested:
+        // 1. Configure AugmentedFaceMode.MESH3D
+        facesManager.configureFaceMode(s, config, true)
+        config.planeFindingMode = Config.PlaneFindingMode.DISABLED
+        s.configure(config)
+        // 2. Switch camera to front
+        facesManager.selectFrontCameraConfig(s)
       } else {
+        // Returning to rear-camera AR:
+        // 1. Restore rear-camera configuration
         facesManager.configureFaceMode(s, config, false)
-        facesManager.selectBackCameraConfig(s)
         config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
-        true
+        s.configure(config)
+        // 2. Switch camera back to rear
+        facesManager.selectBackCameraConfig(s)
       }
-      s.configure(config)
       s.resume()
       Log.i(TAG, "Switched camera facing (isFront=$isFrontFaceTracking, success=$success)")
       success

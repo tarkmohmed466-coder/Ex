@@ -45,7 +45,10 @@ data class SharedSpatialExhibit(
   val rotation: FloatArray,
   val scale: Float,
   val hostDeviceId: String = "${android.os.Build.MANUFACTURER}_${android.os.Build.MODEL}",
+  val hostClientIdentity: String = hostDeviceId,
+  val isHost: Boolean = true,
   val syncTimestampMs: Long = System.currentTimeMillis(),
+  val syncVersion: Long = 1L,
   val isRealtimeBackendConnected: Boolean = false
 ) {
   // Aliases for seamless backward compatibility
@@ -53,6 +56,9 @@ data class SharedSpatialExhibit(
   val poseTranslation: FloatArray get() = position
   val poseRotation: FloatArray get() = rotation
   val modelScale: Float get() = scale
+  val timestamp: Long get() = syncTimestampMs
+  val version: Long get() = syncVersion
+  val isMultiplayerActive: Boolean get() = isRealtimeBackendConnected
 
   override fun equals(other: Any?): Boolean {
     if (this === other) return true
@@ -106,6 +112,60 @@ class CloudAnchorManager(context: Context? = null) {
 
   var activeSharedExhibit: SharedSpatialExhibit? = null
     private set
+
+  var isCloudAnchorModeSupported: Boolean = false
+    private set
+  var isConfigured: Boolean = false
+    private set
+  var unsupportedReason: String? = null
+    private set
+  var isRealtimeBackendConnected: Boolean = false
+    private set
+
+  val isMultiplayerActive: Boolean
+    get() = isRealtimeBackendConnected && activeSharedExhibit != null
+
+  fun setRealtimeBackendConnected(connected: Boolean) {
+    isRealtimeBackendConnected = connected
+    activeSharedExhibit?.let {
+      activeSharedExhibit = it.copy(isRealtimeBackendConnected = connected)
+    }
+  }
+
+  /**
+   * Configures CloudAnchorMode on Session config.
+   * When Cloud Anchors are requested and supported, configure:
+   * Config.CloudAnchorMode.ENABLED before calling Session.configure().
+   * If unsupported, gracefully disable the feature and expose the real reason.
+   */
+  fun configureCloudAnchorMode(session: Session, config: Config): Boolean {
+    return try {
+      val testConfig = Config(session)
+      testConfig.cloudAnchorMode = Config.CloudAnchorMode.ENABLED
+      if (session.isSupported(testConfig)) {
+        config.cloudAnchorMode = Config.CloudAnchorMode.ENABLED
+        isCloudAnchorModeSupported = true
+        isConfigured = true
+        unsupportedReason = null
+        Log.i(TAG, "ARCore Cloud Anchors configured and ENABLED.")
+        true
+      } else {
+        config.cloudAnchorMode = Config.CloudAnchorMode.DISABLED
+        isCloudAnchorModeSupported = false
+        isConfigured = false
+        unsupportedReason = "CloudAnchorMode.ENABLED is not supported on this device or ARCore APK version."
+        Log.w(TAG, unsupportedReason!!)
+        false
+      }
+    } catch (e: Exception) {
+      config.cloudAnchorMode = Config.CloudAnchorMode.DISABLED
+      isCloudAnchorModeSupported = false
+      isConfigured = false
+      unsupportedReason = e.message ?: "Failed to check CloudAnchorMode support."
+      Log.w(TAG, "Failed configuring Cloud Anchors: ${e.message}")
+      false
+    }
+  }
 
   val cloudAnchorsCount: Int
     get() = activeRecords.size

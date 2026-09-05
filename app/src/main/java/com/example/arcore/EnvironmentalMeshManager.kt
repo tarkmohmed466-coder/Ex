@@ -202,11 +202,17 @@ class EnvironmentalMeshManager {
       val totalChunks = detectedPlaneChunks.size + streetscapeChunks.size + environmental3dChunks.size
       val real3dMeshCount = streetscapeChunks.size + environmental3dChunks.size
       val hasReal3dMesh = real3dMeshCount > 0
+      // True full 3D reconstruction requires actual dense 3D mesh geometry with substantial coverage,
+      // never declared true merely because two arbitrary chunks exist.
+      val hasSubstantial3dCoverage = hasReal3dMesh && (
+        environmental3dChunks.isNotEmpty() ||
+        (streetscapeChunks.size >= 5 && totalArea >= 50.0f && totalTris >= 500)
+      )
 
       telemetry = ReconstructionTelemetry(
         isReconstructionActive = totalChunks > 0,
         hasReal3dMeshGeometry = hasReal3dMesh,
-        isFull3dSceneReconstruction = hasReal3dMesh && real3dMeshCount >= 2,
+        isFull3dSceneReconstruction = hasSubstantial3dCoverage,
         detectedPlanesCount = detectedPlaneChunks.size,
         streetscapeGeometriesCount = streetscapeChunks.size,
         denseMeshChunksCount = environmental3dChunks.size,

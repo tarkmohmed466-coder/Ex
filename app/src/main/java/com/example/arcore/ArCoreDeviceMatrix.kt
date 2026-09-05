@@ -22,7 +22,9 @@ data class DeviceCapabilityCertification(
   val manufacturer: String,
   val isArCoreInstalled: Boolean,
   val isArCoreSupported: Boolean,
-  val isGoogleCertifiedDevice: Boolean,
+  val isRuntimeServiceAvailable: Boolean = isArCoreInstalled && isArCoreSupported,
+  val hasCertifiedHardwareProfile: Boolean = false,
+  val isGoogleCertifiedDevice: Boolean = false, // Official Google certification requires Play Services server attestation, not client string matching
   val certificationTier: String,
   val supportsDepthApi: Boolean,
   val supportsRawDepth: Boolean,
@@ -38,7 +40,7 @@ data class DeviceCapabilityCertification(
 object ArCoreDeviceMatrix {
   private const val TAG = "ArCoreDeviceMatrix"
 
-  // Curated database of verified device families officially certified for Google ARCore
+  // Curated database of verified device families known to have Google ARCore hardware profiles
   private val KNOWN_CERTIFIED_TIER_A = listOf(
     "pixel 6", "pixel 7", "pixel 8", "pixel 9", "pixel fold", "pixel pro",
     "galaxy s21", "galaxy s22", "galaxy s23", "galaxy s24", "galaxy s25",
@@ -54,6 +56,12 @@ object ArCoreDeviceMatrix {
 
   /**
    * Certifies current device hardware and ARCore capabilities.
+   * Explicitly separates:
+   * 1. ARCore installed status
+   * 2. ARCore supported status
+   * 3. Runtime service availability
+   * 4. Known hardware profile
+   * 5. Official Google certification (never claimed purely from a hardcoded list).
    */
   fun certifyDevice(context: Context, session: Session?): DeviceCapabilityCertification {
     val model = Build.MODEL ?: "Unknown"
@@ -76,8 +84,10 @@ object ArCoreDeviceMatrix {
       false
     }
 
-    // 3. Official Google-certified device profile verification
-    // NOTE: Does NOT infer Google certification simply because Session != null.
+    // 3. Runtime service availability
+    val runtimeServiceAvailable = arCoreInstalled && arCoreSupported && (session != null)
+
+    // 4. Hardware profile check
     val isEmulator = Build.FINGERPRINT.startsWith("generic") ||
                      Build.FINGERPRINT.startsWith("unknown") ||
                      Build.HARDWARE.contains("goldfish") ||
@@ -87,7 +97,18 @@ object ArCoreDeviceMatrix {
     val matchesCertifiedDatabase = KNOWN_CERTIFIED_TIER_A.any { fullDeviceName.contains(it) } ||
                                   KNOWN_CERTIFIED_TIER_B.any { fullDeviceName.contains(it) }
 
-    val isGoogleCertified = arCoreSupported && matchesCertifiedDatabase && !isEmulator
+    val hasCertifiedProfile = arCoreSupported && matchesCertifiedDatabase && !isEmulator
+
+    // Do NOT claim official Google certification based solely on a custom hardcoded device list
+    val isGoogleCertified = false
+
+    val certTier = when {
+      isEmulator -> "EMULATOR (VIRTUAL HARDWARE)"
+      hasCertifiedProfile && KNOWN_CERTIFIED_TIER_A.any { fullDeviceName.contains(it) } -> "KNOWN TIER-A PROFILE"
+      hasCertifiedProfile -> "KNOWN TIER-B PROFILE"
+      arCoreSupported -> "ARCORE SUPPORTED HARDWARE"
+      else -> "UNSUPPORTED HARDWARE"
+    }
 
     // 4. Real runtime capability detection strictly via ARCore session APIs
     val depthSupported = session?.let {
@@ -160,6 +181,8 @@ object ArCoreDeviceMatrix {
       manufacturer = manufacturer,
       isArCoreInstalled = arCoreInstalled,
       isArCoreSupported = arCoreSupported,
+      isRuntimeServiceAvailable = runtimeServiceAvailable,
+      hasCertifiedHardwareProfile = hasCertifiedProfile,
       isGoogleCertifiedDevice = isGoogleCertified,
       certificationTier = tier,
       supportsDepthApi = depthSupported,

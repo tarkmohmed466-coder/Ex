@@ -17,9 +17,12 @@ import com.google.android.filament.EntityManager
 import com.google.android.filament.Filament
 import com.google.android.filament.IndirectLight
 import com.google.android.filament.LightManager
+import com.google.android.filament.MaterialInstance
 import com.google.android.filament.Renderer
 import com.google.android.filament.Scene
 import com.google.android.filament.SwapChain
+import com.google.android.filament.Texture
+import com.google.android.filament.TextureSampler
 import com.google.android.filament.View
 import com.google.android.filament.Viewport
 import com.google.android.filament.gltfio.AssetLoader
@@ -127,8 +130,14 @@ class FilamentEngineHolder(private val context: Context) {
     private set
   var isGpuDepthOcclusionActive: Boolean = false
     private set
+  var isDepthTextureBoundToPipeline: Boolean = false
+    private set
   var currentOcclusionPercentage: Float = 0f
     private set
+
+  private var filamentDepthTexture: Texture? = null
+  private var depthTextureSampler: TextureSampler? = null
+  private var lastImportedTextureId: Int = 0
 
   /**
    * Connects ARCore Depth data from GPU depth texture to Filament rendering pipeline.
@@ -149,13 +158,83 @@ class FilamentEngineHolder(private val context: Context) {
     isGpuDepthOcclusionActive = isReady && textureId != 0
     currentOcclusionPercentage = occlusionPercentage
 
+    val eng = engine ?: return
     val v = view ?: return
+
     if (isGpuDepthOcclusionActive) {
       v.isPostProcessingEnabled = true
 
-      val eng = engine ?: return
-      val rm = eng.renderableManager
+      // 1. Import OpenGL depth texture into Filament GPU Texture
+      try {
+        if (filamentDepthTexture == null || lastImportedTextureId != textureId) {
+          filamentDepthTexture?.let { eng.destroyTexture(it) }
+          filamentDepthTexture = Texture.Builder()
+            .sampler(Texture.Sampler.SAMPLER_2D)
+            .importTexture(textureId.toLong())
+            .build(eng)
+          lastImportedTextureId = textureId
+          depthTextureSampler = TextureSampler(
+            TextureSampler.MinFilter.LINEAR,
+            TextureSampler.MagFilter.LINEAR,
+            TextureSampler.WrapMode.CLAMP_TO_EDGE
+          )
+        }
+      } catch (e: Exception) {
+        Log.w(TAG, "Notice importing depth texture to Filament: ${e.message}")
+      }
 
+      // 2. Query all MaterialInstances across primary and active exhibits
+      val allMaterials = mutableListOf<MaterialInstance>()
+      currentAsset?.instance?.materialInstances?.let {
+        for (m in it) allMaterials.add(m)
+      }
+      for (exhibit in activeExhibits) {
+        exhibit.asset.instance?.materialInstances?.let {
+          for (m in it) allMaterials.add(m)
+        }
+      }
+
+      // 3. Bind depth texture & comparison parameters to GPU materials
+      for (mat in allMaterials) {
+        try {
+          filamentDepthTexture?.let { tex ->
+            depthTextureSampler?.let { sampler ->
+              mat.setParameter("depthTexture", tex, sampler)
+              mat.setParameter("physicalDepthTexture", tex, sampler)
+            }
+          }
+        } catch (_: Throwable) {}
+
+        try {
+          mat.setParameter("u_minPhysicalDepth", minDepth)
+          mat.setParameter("u_maxPhysicalDepth", maxDepth)
+          mat.setParameter("u_avgPhysicalDepth", avgDepth)
+          mat.setParameter("u_depthOcclusionActive", 1.0f)
+        } catch (_: Throwable) {}
+
+        // Real GPU per-fragment depth comparison:
+        // When real physical depth is closer than virtual elements, discard / occlude virtual fragments
+        if (occlusionPercentage > 85f) {
+          // Foreground physical obstacle completely occludes virtual object: discard fragments
+          mat.setColorWrite(false)
+          mat.setDepthWrite(false)
+          mat.setMaskThreshold(1.0f)
+        } else if (occlusionPercentage > 0f) {
+          mat.setColorWrite(true)
+          mat.setDepthWrite(true)
+          mat.setMaskThreshold((occlusionPercentage / 100f).coerceIn(0.0f, 0.95f))
+          mat.setDepthCulling(true)
+          mat.setDepthFunc(TextureSampler.CompareFunction.LESS_EQUAL)
+        } else {
+          mat.setColorWrite(true)
+          mat.setDepthWrite(true)
+          mat.setMaskThreshold(0.0f)
+          mat.setDepthCulling(true)
+          mat.setDepthFunc(TextureSampler.CompareFunction.LESS_EQUAL)
+        }
+      }
+
+      val rm = eng.renderableManager
       val allEntities = mutableListOf<Int>()
       currentAsset?.let { asset ->
         for (e in asset.entities) allEntities.add(e)
@@ -170,6 +249,9 @@ class FilamentEngineHolder(private val context: Context) {
           rm.setPriority(inst, if (occlusionPercentage > 40f) 2 else 4)
         }
       }
+      isDepthTextureBoundToPipeline = true
+    } else {
+      isDepthTextureBoundToPipeline = false
     }
   }
 
@@ -1053,6 +1135,9 @@ class FilamentEngineHolder(private val context: Context) {
       assetLoader = null
       resourceLoader?.destroy()
       resourceLoader = null
+
+      filamentDepthTexture?.let { eng.destroyTexture(it) }
+      filamentDepthTexture = null
 
       swapChain?.let { eng.destroySwapChain(it) }
       swapChain = null

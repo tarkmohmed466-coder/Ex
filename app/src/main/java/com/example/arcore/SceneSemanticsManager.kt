@@ -26,6 +26,7 @@ data class SemanticQueryResult(
 data class SemanticsTelemetry(
   val isSemanticModeSupported: Boolean = false,
   val isEnabled: Boolean = false,
+  val isGpuSemanticRenderingActive: Boolean = false, // Analyzed on CPU frame buffers; GPU semantic rendering only reported when bound to shader pipeline
   val dominantLabel: String = "SCANNING",
   val dominantConfidencePercent: Int = 0,
   val isOutdoorScene: Boolean = false,

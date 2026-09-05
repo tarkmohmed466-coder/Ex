@@ -305,7 +305,9 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     vertexCount: Int,
     trackingData: ArCoreTrackingData,
     depthManager: DepthOcclusionManager? = null,
-    modelDimensions: String = "1.00m x 0.85m x 1.10m (1:1 Scale)"
+    modelDimensions: String = "1.00m x 0.85m x 1.10m (1:1 Scale)",
+    isGpuDepthOcclusionActive: Boolean = false,
+    isDepthTextureBoundToPipeline: Boolean = false
   ) {
     // Update distances from camera to anchors
     val camPos = trackingData.cameraPosition
@@ -352,6 +354,8 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         depthAvgMeters = depthManager?.averageDepthMeters ?: it.depthAvgMeters,
         depthOcclusionDetected = depthManager?.isOcclusionDetected ?: false,
         occlusionPercentage = depthManager?.occlusionPercentage ?: 0f,
+        isGpuDepthOcclusionActive = isGpuDepthOcclusionActive,
+        isDepthTextureBoundToPipeline = isDepthTextureBoundToPipeline,
         isInstantPlacementActive = trackingData.isInstantPlacementEnabled,
         isGeospatialActive = trackingData.geospatialStatus.isSupported,
         earthTrackingState = "${trackingData.geospatialStatus.earthState} (${trackingData.geospatialStatus.trackingState})",

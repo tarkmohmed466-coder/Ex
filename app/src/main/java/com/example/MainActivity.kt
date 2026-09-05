@@ -186,7 +186,9 @@ fun MixedRealityScreen(
           vertexCount = vertexCount,
           trackingData = trackingData,
           depthManager = depthOcclusionManager,
-          modelDimensions = dims
+          modelDimensions = dims,
+          isGpuDepthOcclusionActive = filamentEngine.isGpuDepthOcclusionActive,
+          isDepthTextureBoundToPipeline = filamentEngine.isDepthTextureBoundToPipeline
         )
       }
       onAnchorPlaced = { anchor, hitPos, source, modelId, modelTitle ->
