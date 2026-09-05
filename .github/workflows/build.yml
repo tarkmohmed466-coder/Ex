@@ -48,8 +48,8 @@ jobs:
             export ANDROID_HOME="/usr/local/lib/android/sdk"
           fi
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" || true
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Verify Gradle Wrapper integrity
         run: |
@@ -65,7 +65,25 @@ jobs:
           chmod +x gradlew
           echo "Gradle wrapper verified successfully."
 
-      # Mandatory Deterministic CI Sequence: clean -> test -> compile -> process resources -> process manifest -> assemble -> verify
+      - name: Comprehensive CI Environment & Toolchain Diagnostics
+        run: |
+          echo "=================== CI ENVIRONMENT DIAGNOSTICS ==================="
+          echo "--- Java Version ---"
+          java -version
+          javac -version
+          echo "--- Gradle Version & Toolchain ---"
+          ./gradlew --version
+          echo "--- Gradle Wrapper Configuration ---"
+          cat gradle/wrapper/gradle-wrapper.properties
+          echo "--- Version Catalog (libs.versions.toml) ---"
+          cat gradle/libs.versions.toml | grep -E 'agp|kotlin|ksp'
+          echo "--- Project SDK Configuration (app/build.gradle.kts) ---"
+          grep -E 'compileSdk|minSdk|targetSdk|jvmToolchain' app/build.gradle.kts
+          echo "--- Installed Android SDK Platforms & Build Tools ---"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed | grep -E 'platforms;|build-tools;'
+          echo "=================================================================="
+
+      # Mandatory Deterministic CI Sequence: clean -> ksp -> test -> compile -> process resources -> process manifest -> assemble -> verify
 
       - name: 1. Clean Workspace (clean)
         run: |
@@ -79,19 +97,23 @@ jobs:
         run: |
           ./gradlew :app:testDebugUnitTest --stacktrace
 
-      - name: 4. Compile Kotlin and Java (compile)
+      - name: 4. Compile Kotlin Sources (compile Kotlin)
         run: |
-          ./gradlew :app:compileDebugKotlin :app:compileDebugJavaWithJavac --stacktrace
+          ./gradlew :app:compileDebugKotlin --stacktrace
 
-      - name: 5. Process Resources (process)
+      - name: 5. Compile Java Sources (compile Java)
+        run: |
+          ./gradlew :app:compileDebugJavaWithJavac --stacktrace
+
+      - name: 6. Process Android Resources (process resources)
         run: |
           ./gradlew :app:processDebugResources --stacktrace
 
-      - name: 6. Process Main Manifest (manifest)
+      - name: 7. Process Android Manifest (process manifest)
         run: |
-          ./gradlew :app:processDebugMainManifest --stacktrace
+          ./gradlew :app:processDebugManifest --stacktrace
 
-      - name: 7. Assemble Debug APK (assemble)
+      - name: 8. Assemble Debug APK (assemble)
         run: |
           ./gradlew :app:assembleDebug --stacktrace
 

@@ -215,25 +215,37 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
     log("SPATIAL_ANCHOR", "Removed anchor: $anchorId")
   }
 
-  fun toggleRecording() {
-    val willRecord = !_isRecording.value
-    _isRecording.value = willRecord
-
-    if (willRecord) {
-      _recordingDurationSec.value = 0
-      recordingJob = viewModelScope.launch {
-        while (_isRecording.value) {
-          delay(1000)
-          _recordingDurationSec.update { it + 1 }
-        }
+  fun toggleRecording(sessionManager: com.example.arcore.ArCoreSessionManager? = null) {
+    val currentlyRecording = _isRecording.value
+    if (!currentlyRecording) {
+      if (sessionManager == null) {
+        emitToast("ARCore session unavailable for recording")
+        return
       }
-      emitToast("Spatial Capture Started")
-      log("RECORDER", "Spatial recording pipeline active")
+      val success = sessionManager.startRecording()
+      if (success) {
+        _isRecording.value = true
+        _recordingDurationSec.value = 0
+        emitToast("ARCore Session Recording Started")
+        log("RECORDER", "ARCore MP4 dataset recording active")
+      } else {
+        val err = sessionManager.recordingPlaybackManager.telemetry.errorMessage ?: "Failed to start ARCore recording"
+        emitToast("Recording failed: $err")
+        log("RECORDER_ERR", err)
+      }
     } else {
-      recordingJob?.cancel()
-      val duration = _recordingDurationSec.value
-      emitToast("Spatial Video saved ($duration s)")
-      log("RECORDER", "Spatial capture saved. Duration: $duration s")
+      val recordedFile = sessionManager?.stopRecording()
+      _isRecording.value = false
+      if (recordedFile != null && recordedFile.exists() && recordedFile.length() > 0) {
+        val durationSec = sessionManager.recordingPlaybackManager.telemetry.recordedDurationSeconds.toInt()
+        val sizeKb = recordedFile.length() / 1024
+        emitToast("ARCore dataset saved (${recordedFile.name}, ${sizeKb} KB, ${durationSec}s)")
+        log("RECORDER", "ARCore recording dataset created: ${recordedFile.absolutePath} (${sizeKb} KB, ${durationSec}s)")
+      } else {
+        val err = sessionManager?.recordingPlaybackManager?.telemetry?.errorMessage ?: "Recording dataset not created or empty"
+        emitToast("Recording error: $err")
+        log("RECORDER_ERR", err)
+      }
     }
   }
 
@@ -330,6 +342,11 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
       _nearbyExhibit.value = if (minDistance < 2.2f) closest else null
     } else {
       _nearbyExhibit.value = null
+    }
+
+    if (trackingData.recordingTelemetry.isRecording) {
+      _isRecording.value = true
+      _recordingDurationSec.value = trackingData.recordingTelemetry.recordedDurationSeconds.toInt()
     }
 
     _telemetry.update {

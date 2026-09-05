@@ -99,14 +99,15 @@ object ArCoreDeviceMatrix {
 
     val hasCertifiedProfile = arCoreSupported && matchesCertifiedDatabase && !isEmulator
 
-    // Do NOT claim official Google certification based solely on a custom hardcoded device list
+    // Do NOT claim official Google certification based on local heuristics or custom list
+    // Official Google certification requires authoritative attestation from Google Play Services.
     val isGoogleCertified = false
 
     val certTier = when {
-      isEmulator -> "EMULATOR (VIRTUAL HARDWARE)"
-      hasCertifiedProfile && KNOWN_CERTIFIED_TIER_A.any { fullDeviceName.contains(it) } -> "KNOWN TIER-A PROFILE"
-      hasCertifiedProfile -> "KNOWN TIER-B PROFILE"
-      arCoreSupported -> "ARCORE SUPPORTED HARDWARE"
+      isEmulator -> "EMULATOR (CUSTOM VIRTUAL ENVIRONMENT)"
+      hasCertifiedProfile && KNOWN_CERTIFIED_TIER_A.any { fullDeviceName.contains(it) } -> "CUSTOM COMPATIBILITY DETECTION: TIER-A"
+      hasCertifiedProfile -> "CUSTOM COMPATIBILITY DETECTION: TIER-B"
+      arCoreSupported -> "CUSTOM COMPATIBILITY DETECTION: BASIC ARCORE"
       else -> "UNSUPPORTED HARDWARE"
     }
 

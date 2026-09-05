@@ -191,6 +191,30 @@ class EnvironmentalMeshManager {
           }
 
           val pose = sg.meshPose
+
+          // Compute real surface area from actual 3D mesh vertices and triangle indices
+          var calculatedArea = 0f
+          val vBuf = mesh.vertexList
+          val iBuf = mesh.indexList
+          val numTris = iBuf.limit() / 3
+          for (t in 0 until minOf(numTris, 2000)) {
+            val i0 = iBuf.get(t * 3).toInt() and 0xFFFF
+            val i1 = iBuf.get(t * 3 + 1).toInt() and 0xFFFF
+            val i2 = iBuf.get(t * 3 + 2).toInt() and 0xFFFF
+            if (i0 * 3 + 2 < vBuf.limit() && i1 * 3 + 2 < vBuf.limit() && i2 * 3 + 2 < vBuf.limit()) {
+              val ax = vBuf.get(i0 * 3); val ay = vBuf.get(i0 * 3 + 1); val az = vBuf.get(i0 * 3 + 2)
+              val bx = vBuf.get(i1 * 3); val by = vBuf.get(i1 * 3 + 1); val bz = vBuf.get(i1 * 3 + 2)
+              val cx = vBuf.get(i2 * 3); val cy = vBuf.get(i2 * 3 + 1); val cz = vBuf.get(i2 * 3 + 2)
+              // Vector AB x Vector AC
+              val abx = bx - ax; val aby = by - ay; val abz = bz - az
+              val acx = cx - ax; val acy = cy - ay; val acz = cz - az
+              val crossX = aby * acz - abz * acy
+              val crossY = abz * acx - abx * acz
+              val crossZ = abx * acy - aby * acx
+              calculatedArea += 0.5f * Math.sqrt((crossX * crossX + crossY * crossY + crossZ * crossZ).toDouble()).toFloat()
+            }
+          }
+
           val chunk = MeshChunk(
             id = "streetscape_${sg.hashCode()}",
             sourceType = GeometrySourceType.STREETSCAPE_3D_MESH,
@@ -198,7 +222,7 @@ class EnvironmentalMeshManager {
             vertexCount = vertCount,
             triangleCount = triCount,
             centerPosition = floatArrayOf(pose.tx(), pose.ty(), pose.tz()),
-            surfaceAreaSquareMeters = (vertCount * 0.5f)
+            surfaceAreaSquareMeters = calculatedArea
           )
           streetscapeChunks[chunk.id] = chunk
 
@@ -210,33 +234,14 @@ class EnvironmentalMeshManager {
         // Streetscape not active on current device/environment
       }
 
-      // 3. Process local environmental 3D mesh points / point cloud if frame available
+      // 3. Environmental 3D Mesh: Point Cloud samples are unorganized feature points,
+      // NOT real mesh triangles. We do NOT synthesize fake mesh triangles or surface area.
+      // Only report environmental mesh geometry when actual 3D mesh vertices and triangle indices exist.
       if (frame != null) {
         var pointCloud: com.google.ar.core.PointCloud? = null
         try {
           pointCloud = frame.acquirePointCloud()
-          val pts = pointCloud.points
-          val count = pts.limit() / 4
-          if (count >= 50) {
-            val sampleCount = minOf(count, 300)
-            val chunkVerts = sampleCount
-            val chunkTris = (sampleCount - 2).coerceAtLeast(0)
-            val area = sampleCount * 0.035f
-            val chunk = MeshChunk(
-              id = "local_mesh_chunk_${frame.timestamp}",
-              sourceType = GeometrySourceType.ENVIRONMENTAL_3D_MESH,
-              category = MeshSurfaceCategory.GENERIC_OBSTACLE,
-              vertexCount = chunkVerts,
-              triangleCount = chunkTris,
-              centerPosition = floatArrayOf(0f, 0f, -1.0f),
-              surfaceAreaSquareMeters = area
-            )
-            environmental3dChunks[chunk.id] = chunk
-            if (environmental3dChunks.size > 8) {
-              val oldestKey = environmental3dChunks.keys.first()
-              environmental3dChunks.remove(oldestKey)
-            }
-          }
+          // Validates point cloud availability without fabricating mesh topology
         } catch (_: Throwable) {
         } finally {
           pointCloud?.close()

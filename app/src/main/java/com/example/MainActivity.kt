@@ -378,7 +378,7 @@ fun MixedRealityScreen(
         },
         onRecClick = {
           hapticManager.performHeavy()
-          viewModel.toggleRecording()
+          viewModel.toggleRecording(spatialSurfaceView.arCoreSessionManager)
         },
         onOpenClick = {
           hapticManager.performClick()

@@ -655,6 +655,22 @@ class ArCoreSessionManager(private val context: Context) {
 
   fun createAnchorForAugmentedImage(image: AugmentedImage): Anchor? = createAnchorFromImage(image)
 
+  fun startRecording(): Boolean {
+    val s = session ?: run {
+      Log.w(TAG, "Cannot start recording: ARCore session is not initialized")
+      return false
+    }
+    return recordingPlaybackManager.startRecording(s)
+  }
+
+  fun stopRecording(): java.io.File? {
+    val s = session ?: run {
+      Log.w(TAG, "Cannot stop recording: ARCore session is not initialized")
+      return null
+    }
+    return recordingPlaybackManager.stopRecording(s)
+  }
+
   fun switchCameraFacing(isFrontFaceTracking: Boolean): Boolean {
     val s = session ?: return false
     return try {
