@@ -66,6 +66,7 @@ import com.example.ui.components.ExhibitMarkerGuideSheet
 import com.example.ui.components.ModelSelectorSheet
 import com.example.ui.components.SettingsSheet
 import com.example.ui.components.TopModePill
+import com.example.ui.components.TrackingRecoveryCard
 import com.example.ui.theme.MyApplicationTheme
 import com.example.viewmodel.SpatialViewModel
 import kotlinx.coroutines.launch
@@ -327,6 +328,26 @@ fun MixedRealityScreen(
         }
       )
     }
+
+    // Explicit Tracking Recovery Affordance (Point 10: Surface explicit tracking-recovery affordance when tracking lost)
+    val isTrackingLost = (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) &&
+      hasCameraPermission &&
+      telemetry.arTrackingStatus != "TRACKING" &&
+      telemetry.arTrackingStatus != "UNINITIALIZED"
+
+    TrackingRecoveryCard(
+      isVisible = isTrackingLost,
+      trackingStatus = telemetry.arTrackingStatus,
+      onRecenterClick = {
+        hapticManager.performClick()
+        spatialSurfaceView.arCoreSessionManager.resetWalkingOrigin()
+      },
+      modifier = Modifier
+        .fillMaxWidth()
+        .statusBarsPadding()
+        .padding(top = 76.dp)
+        .align(Alignment.TopCenter)
+    )
 
     // 8. BOTTOM CONTROLS: Floating Action Pill [ PHOTO | (● REC) | Open | Clear ]
     Box(

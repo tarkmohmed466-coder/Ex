@@ -145,4 +145,9 @@ class AugmentedFacesManager {
       Log.d(TAG, "Face tracking frame update: ${e.message}")
     }
   }
+
+  fun resetState() {
+    isEnabled = false
+    state = FaceTrackingState()
+  }
 }

@@ -3,9 +3,11 @@ package com.example.arcore
 import android.media.Image
 import android.opengl.GLES20
 import android.util.Log
+import com.google.ar.core.Config
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Frame
 import com.google.ar.core.Pose
+import com.google.ar.core.Session
 import com.google.ar.core.exceptions.NotYetAvailableException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -322,6 +324,26 @@ class DepthOcclusionManager {
       GLES20.glActiveTexture(textureUnit)
       GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depthTextureId)
     }
+  }
+
+  fun configureDepthMode(session: Session, config: Config) {
+    if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+      config.depthMode = Config.DepthMode.AUTOMATIC
+      Log.i(TAG, "Configured DepthMode AUTOMATIC")
+    } else {
+      config.depthMode = Config.DepthMode.DISABLED
+      Log.i(TAG, "DepthMode not supported, set to DISABLED")
+    }
+  }
+
+  fun clear() {
+    isDepthTextureReady = false
+    latestDepthTimestampNs = 0L
+    isOcclusionDetected = false
+    occlusionPercentage = 0f
+    depthCoveragePercentage = 0f
+    depthConfidencePercentage = null
+    isConfidenceAvailable = false
   }
 
   fun destroy() {

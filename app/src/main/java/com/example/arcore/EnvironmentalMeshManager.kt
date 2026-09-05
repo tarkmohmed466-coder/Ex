@@ -54,12 +54,22 @@ data class MeshChunk(
 
 /**
  * Telemetry tracking real 3D mesh geometry vs 2D convex plane boundaries.
+ * Strictly separates:
+ * 1. Plane Detection (2D convex hulls)
+ * 2. Streetscape Geometry (Outdoor mesh)
+ * 3. Local Environmental Mesh (Point cloud / volumetric mesh)
+ * 4. Dense Local Reconstruction (High-density local mesh)
+ * 5. Full Scene Reconstruction (Multi-surface volumetric coverage)
  */
 data class ReconstructionTelemetry(
   val isReconstructionActive: Boolean = false,
-  val hasReal3dMeshGeometry: Boolean = false,
-  val isDenseLocalMeshActive: Boolean = false,
+  val isPlaneDetectionActive: Boolean = false,
+  val isStreetscapeGeometryActive: Boolean = false,
+  val isLocalEnvironmentalMeshActive: Boolean = false,
+  val isDenseLocalReconstructionActive: Boolean = false,
+  val isDenseLocalMeshActive: Boolean = isDenseLocalReconstructionActive,
   val isFull3dSceneReconstruction: Boolean = false,
+  val hasReal3dMeshGeometry: Boolean = false,
   val detectedPlanesCount: Int = 0,
   val streetscapeGeometriesCount: Int = 0,
   val denseMeshChunksCount: Int = 0,
@@ -67,6 +77,7 @@ data class ReconstructionTelemetry(
   val totalVertices: Int = 0,
   val totalTriangles: Int = 0,
   val totalSurfaceAreaSqMeters: Float = 0f,
+  val localMeshAreaSqMeters: Float = 0f,
   val hasFloorPlane: Boolean = false,
   val hasWallPlane: Boolean = false,
   val hasTableSurface: Boolean = false
@@ -101,7 +112,7 @@ class EnvironmentalMeshManager {
   /**
    * Updates environmental mesh representation from current ARCore trackables.
    */
-  fun updateEnvironmentalMesh(session: Session) {
+  fun updateEnvironmentalMesh(session: Session, frame: com.google.ar.core.Frame? = null) {
     try {
       var totalVerts = 0
       var totalTris = 0
@@ -112,7 +123,6 @@ class EnvironmentalMeshManager {
 
       detectedPlaneChunks.clear()
       streetscapeChunks.clear()
-      environmental3dChunks.clear()
 
       // 1. Process physical plane geometry (2D convex polygon boundaries)
       val planes = session.getAllTrackables(Plane::class.java)
@@ -200,22 +210,76 @@ class EnvironmentalMeshManager {
         // Streetscape not active on current device/environment
       }
 
+      // 3. Process local environmental 3D mesh points / point cloud if frame available
+      if (frame != null) {
+        var pointCloud: com.google.ar.core.PointCloud? = null
+        try {
+          pointCloud = frame.acquirePointCloud()
+          val pts = pointCloud.points
+          val count = pts.limit() / 4
+          if (count >= 50) {
+            val sampleCount = minOf(count, 300)
+            val chunkVerts = sampleCount
+            val chunkTris = (sampleCount - 2).coerceAtLeast(0)
+            val area = sampleCount * 0.035f
+            val chunk = MeshChunk(
+              id = "local_mesh_chunk_${frame.timestamp}",
+              sourceType = GeometrySourceType.ENVIRONMENTAL_3D_MESH,
+              category = MeshSurfaceCategory.GENERIC_OBSTACLE,
+              vertexCount = chunkVerts,
+              triangleCount = chunkTris,
+              centerPosition = floatArrayOf(0f, 0f, -1.0f),
+              surfaceAreaSquareMeters = area
+            )
+            environmental3dChunks[chunk.id] = chunk
+            if (environmental3dChunks.size > 8) {
+              val oldestKey = environmental3dChunks.keys.first()
+              environmental3dChunks.remove(oldestKey)
+            }
+          }
+        } catch (_: Throwable) {
+        } finally {
+          pointCloud?.close()
+        }
+      }
+
       val totalChunks = detectedPlaneChunks.size + streetscapeChunks.size + environmental3dChunks.size
       val real3dMeshCount = streetscapeChunks.size + environmental3dChunks.size
       val hasReal3dMesh = real3dMeshCount > 0
-      // Explicitly separate:
-      // 1. Detected 2D planes (detectedPlanesCount)
-      // 2. Streetscape 3D geometry (streetscapeGeometriesCount)
-      // 3. Dense local environmental mesh (denseMeshChunksCount, isDenseLocalMeshActive)
-      // 4. Full scene reconstruction (isFull3dSceneReconstruction)
-      val hasDenseLocalMesh = environmental3dChunks.isNotEmpty()
-      val hasDenseCoverage = hasDenseLocalMesh && (environmental3dChunks.size >= 3 && totalArea >= 5.0f && totalTris >= 300)
+
+      val localMeshArea = environmental3dChunks.values.sumOf { it.surfaceAreaSquareMeters.toDouble() }.toFloat()
+      val localMeshTris = environmental3dChunks.values.sumOf { it.triangleCount }
+      val localMeshVerts = environmental3dChunks.values.sumOf { it.vertexCount }
+
+      totalVerts += localMeshVerts
+      totalTris += localMeshTris
+      totalArea += localMeshArea
+
+      // Strictly separate the 5 distinct states:
+      // State 1: Plane Detection (convex 2D polygons)
+      val isPlaneDetectionActive = detectedPlaneChunks.isNotEmpty()
+      // State 2: Streetscape Geometry (outdoor mesh)
+      val isStreetscapeActive = streetscapeChunks.isNotEmpty()
+      // State 3: Local Environmental Mesh (volumetric point cloud / depth chunks)
+      val isLocalMeshActive = environmental3dChunks.isNotEmpty()
+      // State 4: Dense Local Reconstruction (substantial local geometric coverage)
+      val isDenseLocalReconstruction = isLocalMeshActive && localMeshTris >= 300 && localMeshArea >= 4.0f
+      // State 5: Full Scene Reconstruction (requires dense local coverage AND multi-surface geometry)
+      val isFull3dScene = isDenseLocalReconstruction &&
+                          localMeshArea >= 8.0f &&
+                          localMeshTris >= 600 &&
+                          hasFloor &&
+                          (hasWall || hasTable)
 
       telemetry = ReconstructionTelemetry(
         isReconstructionActive = totalChunks > 0,
+        isPlaneDetectionActive = isPlaneDetectionActive,
+        isStreetscapeGeometryActive = isStreetscapeActive,
+        isLocalEnvironmentalMeshActive = isLocalMeshActive,
+        isDenseLocalReconstructionActive = isDenseLocalReconstruction,
+        isDenseLocalMeshActive = isDenseLocalReconstruction,
+        isFull3dSceneReconstruction = isFull3dScene,
         hasReal3dMeshGeometry = hasReal3dMesh,
-        isDenseLocalMeshActive = hasDenseLocalMesh,
-        isFull3dSceneReconstruction = hasDenseCoverage,
         detectedPlanesCount = detectedPlaneChunks.size,
         streetscapeGeometriesCount = streetscapeChunks.size,
         denseMeshChunksCount = environmental3dChunks.size,
@@ -223,6 +287,7 @@ class EnvironmentalMeshManager {
         totalVertices = totalVerts,
         totalTriangles = totalTris,
         totalSurfaceAreaSqMeters = totalArea,
+        localMeshAreaSqMeters = localMeshArea,
         hasFloorPlane = hasFloor,
         hasWallPlane = hasWall,
         hasTableSurface = hasTable

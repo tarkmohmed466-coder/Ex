@@ -132,3 +132,21 @@ jobs:
           name: unit-test-reports
           path: app/build/reports/tests/
           if-no-files-found: ignore
+
+      - name: CI Failure Diagnostics
+        if: failure()
+        run: |
+          echo "=== CI DIAGNOSTIC ENVIRONMENT INFORMATION ON FAILURE ==="
+          echo "Java version:"
+          java -version 2>&1 || true
+          echo "Javac version:"
+          javac -version 2>&1 || true
+          echo "Gradle version:"
+          ./gradlew --version || true
+          echo "Disk space:"
+          df -h || true
+          echo "Memory status:"
+          free -m || true
+          echo "Environment variables:"
+          printenv | grep -E 'ANDROID|JAVA|GRADLE|RUNNER' || true
+

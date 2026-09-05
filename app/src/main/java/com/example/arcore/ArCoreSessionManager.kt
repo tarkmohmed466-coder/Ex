@@ -121,9 +121,11 @@ class ArCoreSessionManager(private val context: Context) {
   val geospatialManager = ArCoreGeospatialManager()
   val semanticsManager = SceneSemanticsManager()
   val cloudAnchorManager = CloudAnchorManager(context)
+  val multiplayerBackend = RealtimeMultiplayerBackend()
   val facesManager = AugmentedFacesManager()
   val recordingPlaybackManager = ArCoreRecordingPlaybackManager(context)
   val environmentalMeshManager = EnvironmentalMeshManager()
+  val depthOcclusionManager = DepthOcclusionManager()
   var deviceCertification: DeviceCapabilityCertification? = null
     private set
 
@@ -571,7 +573,7 @@ class ArCoreSessionManager(private val context: Context) {
       semanticsManager.processFrameSemantics(frame)
       facesManager.processFrameFaces(currentSession)
       recordingPlaybackManager.updateFrameState(currentSession)
-      environmentalMeshManager.updateEnvironmentalMesh(currentSession)
+      environmentalMeshManager.updateEnvironmentalMesh(currentSession, frame)
 
       val trackingData = ArCoreTrackingData(
         trackingState = camera.trackingState,
@@ -661,7 +663,8 @@ class ArCoreSessionManager(private val context: Context) {
 
       // 2. Release/close previously acquired frame images and depth resources
       depthOcclusionManager.clear()
-      lastFrame = null
+      facesManager.resetState()
+      latestFrame = null
 
       val config = s.config
       val success = if (isFrontFaceTracking) {
@@ -673,6 +676,8 @@ class ArCoreSessionManager(private val context: Context) {
         config.planeFindingMode = Config.PlaneFindingMode.DISABLED
         config.depthMode = Config.DepthMode.DISABLED
         config.instantPlacementMode = Config.InstantPlacementMode.DISABLED
+        config.streetscapeGeometryMode = Config.StreetscapeGeometryMode.DISABLED
+        config.geospatialMode = Config.GeospatialMode.DISABLED
 
         // 5. Configure session again
         s.configure(config)
@@ -685,13 +690,20 @@ class ArCoreSessionManager(private val context: Context) {
         facesManager.configureFaceMode(s, config, false)
         config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
         depthOcclusionManager.configureDepthMode(s, config)
+        config.instantPlacementMode = Config.InstantPlacementMode.LOCAL_Y_UP
+        geospatialManager.configureGeospatialMode(context, s, config)
 
         // 5. Configure session again
         s.configure(config)
         camSuccess
       }
 
-      // 6. Resume session
+      // 6. Re-apply camera texture name to avoid stale black texture buffer
+      if (cameraTextureId != 0) {
+        s.setCameraTextureName(cameraTextureId)
+      }
+
+      // 7. Resume session
       s.resume()
       Log.i(TAG, "Switched camera facing (isFront=$isFrontFaceTracking, success=$success)")
       success

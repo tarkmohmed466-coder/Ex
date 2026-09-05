@@ -170,6 +170,18 @@ fun DiagnosticsHud(
           color = Color(0xFFA78BFA)
         )
       }
+
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+      ) {
+        Text(
+          text = "MR: MONOSCOPIC_PASSTHROUGH_STEREOSCOPIC_VIRTUAL (Monoscopic sensor + L/R stereo 3D)",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 9.sp,
+          color = Color(0xFF67E8F9)
+        )
+      }
     }
   }
 }
