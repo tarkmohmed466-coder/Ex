@@ -3,25 +3,26 @@ package com.example.arcore
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Session
 
 /**
  * Production ARCore Device Capability Matrix & Compatibility Certification.
- * Bridges the gap between raw Android hardware and Google ARCore certified tiers.
- * Verifies support for:
- * 1. 6DoF VIO Motion Tracking
- * 2. Automatic & Raw Depth API
- * 3. Instant Placement Mode
- * 4. Google Geospatial & VPS Earth Localization
- * 5. Scene Semantics & Environment Classification
- * 6. Augmented Faces 3D Mesh
- * 7. Streetscape Geometry & Cloud Anchors
+ * Distinguishes between:
+ * 1. ARCore installed status
+ * 2. ARCore device support status
+ * 3. Official Google-certified device profile status
+ * 4. Runtime feature support (Depth, Raw Depth, Geospatial, Semantics, Cloud Anchors, Faces).
+ *
+ * NOTE: Never infers official Google certification simply because a Session object exists.
  */
 data class DeviceCapabilityCertification(
   val deviceModel: String,
   val manufacturer: String,
-  val isCertifiedArCoreDevice: Boolean,
+  val isArCoreInstalled: Boolean,
+  val isArCoreSupported: Boolean,
+  val isGoogleCertifiedDevice: Boolean,
   val certificationTier: String,
   val supportsDepthApi: Boolean,
   val supportsRawDepth: Boolean,
@@ -37,15 +38,15 @@ data class DeviceCapabilityCertification(
 object ArCoreDeviceMatrix {
   private const val TAG = "ArCoreDeviceMatrix"
 
-  // Curated database of verified device families with known ARCore hardware profiles
-  private val KNOWN_TIER_A_DEVICES = listOf(
-    "pixel 6", "pixel 7", "pixel 8", "pixel 9", "pixel pro",
+  // Curated database of verified device families officially certified for Google ARCore
+  private val KNOWN_CERTIFIED_TIER_A = listOf(
+    "pixel 6", "pixel 7", "pixel 8", "pixel 9", "pixel fold", "pixel pro",
     "galaxy s21", "galaxy s22", "galaxy s23", "galaxy s24", "galaxy s25",
     "galaxy z fold", "galaxy z flip", "galaxy note 20",
     "xiaomi 12", "xiaomi 13", "xiaomi 14", "oneplus 10", "oneplus 11", "oneplus 12"
   )
 
-  private val KNOWN_TIER_B_DEVICES = listOf(
+  private val KNOWN_CERTIFIED_TIER_B = listOf(
     "galaxy a52", "galaxy a53", "galaxy a54", "galaxy a55",
     "pixel 6a", "pixel 7a", "pixel 8a",
     "moto g", "redmi note", "realme gt"
@@ -59,7 +60,36 @@ object ArCoreDeviceMatrix {
     val manufacturer = Build.MANUFACTURER ?: "Unknown"
     val fullDeviceName = "${manufacturer.lowercase()} ${model.lowercase()}"
 
-    // Real runtime capability detection strictly via ARCore session APIs
+    // 1. Check ARCore installed status
+    val arCoreInstalled = try {
+      val avail = ArCoreApk.getInstance().checkAvailability(context)
+      avail == ArCoreApk.Availability.SUPPORTED_INSTALLED
+    } catch (_: Throwable) {
+      false
+    }
+
+    // 2. Check ARCore device support status
+    val arCoreSupported = try {
+      val avail = ArCoreApk.getInstance().checkAvailability(context)
+      avail.isSupported
+    } catch (_: Throwable) {
+      false
+    }
+
+    // 3. Official Google-certified device profile verification
+    // NOTE: Does NOT infer Google certification simply because Session != null.
+    val isEmulator = Build.FINGERPRINT.startsWith("generic") ||
+                     Build.FINGERPRINT.startsWith("unknown") ||
+                     Build.HARDWARE.contains("goldfish") ||
+                     Build.HARDWARE.contains("ranchu") ||
+                     Build.PRODUCT.contains("sdk_gphone")
+
+    val matchesCertifiedDatabase = KNOWN_CERTIFIED_TIER_A.any { fullDeviceName.contains(it) } ||
+                                  KNOWN_CERTIFIED_TIER_B.any { fullDeviceName.contains(it) }
+
+    val isGoogleCertified = arCoreSupported && matchesCertifiedDatabase && !isEmulator
+
+    // 4. Real runtime capability detection strictly via ARCore session APIs
     val depthSupported = session?.let {
       try {
         it.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
@@ -94,12 +124,6 @@ object ArCoreDeviceMatrix {
       } catch (_: Throwable) { false }
     } ?: false
 
-    val imageStabilizationSupported = session?.let {
-      try {
-        it.isImageStabilizationModeSupported(Config.ImageStabilizationMode.EIS)
-      } catch (_: Throwable) { false }
-    } ?: false
-
     // Check front camera support for 3D Face Mesh tracking
     val facesSupported = session?.let {
       try {
@@ -119,7 +143,7 @@ object ArCoreDeviceMatrix {
 
     // Derive tier purely from verified runtime capabilities
     val tier = when {
-      session == null -> "UNVERIFIED"
+      session == null -> "UNINITIALIZED"
       depthSupported && semanticsSupported && geospatialSupported -> "TIER_A_ADVANCED_AR"
       depthSupported || semanticsSupported -> "TIER_B_DEPTH_ENABLED"
       else -> "TIER_C_BASIC_6DOF"
@@ -134,7 +158,9 @@ object ArCoreDeviceMatrix {
     val certification = DeviceCapabilityCertification(
       deviceModel = model,
       manufacturer = manufacturer,
-      isCertifiedArCoreDevice = session != null,
+      isArCoreInstalled = arCoreInstalled,
+      isArCoreSupported = arCoreSupported,
+      isGoogleCertifiedDevice = isGoogleCertified,
       certificationTier = tier,
       supportsDepthApi = depthSupported,
       supportsRawDepth = rawDepthSupported,
@@ -147,7 +173,7 @@ object ArCoreDeviceMatrix {
       recommendedQualityTier = recommendedQuality
     )
 
-    Log.i(TAG, "Device Matrix Certification: $tier (Depth=$depthSupported, Semantics=$semanticsSupported, Geospatial=$geospatialSupported)")
+    Log.i(TAG, "Device Matrix: certified=$isGoogleCertified, supported=$arCoreSupported, tier=$tier (Depth=$depthSupported, Semantics=$semanticsSupported, Geospatial=$geospatialSupported)")
     return certification
   }
 }

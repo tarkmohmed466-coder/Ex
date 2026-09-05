@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build & Test Android App
+    name: Build & Verify Android App
     runs-on: ubuntu-latest
 
     steps:
@@ -50,28 +50,71 @@ jobs:
             chmod +x gradlew
           fi
 
-      - name: Run Unit Tests
+      # Mandatory CI Sequence: clean -> test -> compile -> process -> assemble -> verify
+
+      - name: 1. Clean Workspace (clean)
         run: |
           if [ -f gradlew ]; then
-            ./gradlew testDebugUnitTest --stacktrace
+            ./gradlew clean --stacktrace
+          else
+            gradle clean --stacktrace
+          fi
+
+      - name: 2. Run Unit Tests (test)
+        run: |
+          if [ -f gradlew ]; then
+            ./gradlew :app:testDebugUnitTest --stacktrace
           else
             gradle :app:testDebugUnitTest --stacktrace
           fi
 
-      - name: Build Debug APK
+      - name: 3. Compile Sources (compile)
         run: |
           if [ -f gradlew ]; then
-            ./gradlew assembleDebug --stacktrace
+            ./gradlew :app:compileDebugKotlin :app:compileDebugJavaWithJavac --stacktrace
+          else
+            gradle :app:compileDebugKotlin :app:compileDebugJavaWithJavac --stacktrace
+          fi
+
+      - name: 4. Process Resources (process)
+        run: |
+          if [ -f gradlew ]; then
+            ./gradlew :app:processDebugResources --stacktrace
+          else
+            gradle :app:processDebugResources --stacktrace
+          fi
+
+      - name: 5. Assemble Debug APK (assemble)
+        run: |
+          if [ -f gradlew ]; then
+            ./gradlew :app:assembleDebug --stacktrace
           else
             gradle :app:assembleDebug --stacktrace
           fi
+
+      - name: 6. Verify Artifacts (verify)
+        run: |
+          echo "=== Verifying Generated Debug APK ==="
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: Expected APK artifact not found at $APK_PATH"
+            ls -la app/build/outputs/apk/debug/ || true
+            exit 1
+          fi
+          APK_SIZE=$(stat -c%s "$APK_PATH" 2>/dev/null || stat -f%z "$APK_PATH")
+          echo "Found APK: $APK_PATH ($APK_SIZE bytes)"
+          if [ "$APK_SIZE" -le 1000000 ]; then
+            echo "ERROR: APK file size is suspiciously small: $APK_SIZE bytes"
+            exit 1
+          fi
+          echo "Verification SUCCESS: $APK_PATH passed all integrity checks."
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: warn
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
 
       - name: Upload Test Reports
         if: always()

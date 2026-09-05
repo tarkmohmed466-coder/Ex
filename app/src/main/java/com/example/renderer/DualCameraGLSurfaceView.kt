@@ -19,8 +19,26 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /**
- * High-performance Dual-Viewport Stereoscopic Camera SurfaceView.
- * In MR Mode: Duplicates the real-time camera stream into Left Eye and Right Eye viewports.
+ * Architecture semantic classification for MR passthrough capture vs rendering.
+ */
+enum class MrPassthroughStereoSemantics {
+  /**
+   * Monoscopic physical camera sensor stream duplicated into left and right viewports,
+   * coupled with true stereoscopic off-axis asymmetric virtual 3D rendering per eye.
+   */
+  MONOSCOPIC_PASSTHROUGH_STEREOSCOPIC_VIRTUAL,
+
+  /**
+   * True dual physical binocular camera capture sensors with hardware baseline disparity.
+   */
+  TRUE_STEREO_BINOCULAR_PASSTHROUGH
+}
+
+/**
+ * High-performance Dual-Viewport Camera Passthrough SurfaceView.
+ * ARCHITECTURE CLASSIFICATION:
+ * In MR Mode: Performs MONOSCOPIC camera passthrough (single physical sensor stream duplicated to
+ * Left and Right viewports) while Google Filament renders TRUE STEREOSCOPIC off-axis 3D virtual projection.
  * In AR Mode: Renders single full-screen hardware camera feed.
  * In Object Mode: Renders clean dark studio background.
  */
@@ -28,6 +46,11 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   context: Context,
   attrs: AttributeSet? = null
 ) : GLSurfaceView(context, attrs), GLSurfaceView.Renderer, SurfaceTexture.OnFrameAvailableListener {
+
+  val passthroughSemantics: MrPassthroughStereoSemantics =
+    MrPassthroughStereoSemantics.MONOSCOPIC_PASSTHROUGH_STEREOSCOPIC_VIRTUAL
+
+  val isHardwareBinocularStereo: Boolean = false
 
   companion object {
     private const val TAG = "DualCameraGLView"

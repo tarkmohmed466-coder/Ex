@@ -32,17 +32,46 @@ enum class CloudAnchorLifecycleState {
 
 /**
  * Shared Spatial AR State synchronized between host and client devices (Decoupled Multiplayer Layer).
+ * NOTE: Cloud Anchors provide shared spatial persistence across devices.
+ * Cloud Anchor hosting/resolving alone is not a complete multiplayer system.
+ * Full multiplayer requires an active real-time backend transport (e.g. WebSockets or Firebase).
  */
 data class SharedSpatialExhibit(
-  val sessionCode: String,
+  val sessionRoomIdentifier: String,
+  val exhibitIdentifier: String,
   val cloudAnchorId: String,
-  val hostDeviceId: String,
   val modelId: String,
-  val modelScale: Float,
-  val poseTranslation: FloatArray,
-  val poseRotation: FloatArray,
-  val syncTimestampMs: Long
-)
+  val position: FloatArray,
+  val rotation: FloatArray,
+  val scale: Float,
+  val hostDeviceId: String = "${android.os.Build.MANUFACTURER}_${android.os.Build.MODEL}",
+  val syncTimestampMs: Long = System.currentTimeMillis(),
+  val isRealtimeBackendConnected: Boolean = false
+) {
+  // Aliases for seamless backward compatibility
+  val sessionCode: String get() = sessionRoomIdentifier
+  val poseTranslation: FloatArray get() = position
+  val poseRotation: FloatArray get() = rotation
+  val modelScale: Float get() = scale
+
+  override fun equals(other: Any?): Boolean {
+    if (this === other) return true
+    if (javaClass != other?.javaClass) return false
+    other as SharedSpatialExhibit
+    return sessionRoomIdentifier == other.sessionRoomIdentifier &&
+           exhibitIdentifier == other.exhibitIdentifier &&
+           cloudAnchorId == other.cloudAnchorId &&
+           modelId == other.modelId
+  }
+
+  override fun hashCode(): Int {
+    var result = sessionRoomIdentifier.hashCode()
+    result = 31 * result + exhibitIdentifier.hashCode()
+    result = 31 * result + cloudAnchorId.hashCode()
+    result = 31 * result + modelId.hashCode()
+    return result
+  }
+}
 
 data class CloudAnchorRecord(
   val cloudAnchorId: String,
@@ -331,18 +360,21 @@ class CloudAnchorManager(context: Context? = null) {
     cloudAnchorId: String,
     modelId: String,
     modelScale: Float,
-    pose: Pose
+    pose: Pose,
+    exhibitIdentifier: String = "exhibit_${modelId}"
   ) {
     sharedPrefs?.edit()?.putString(sessionCode, cloudAnchorId)?.apply()
     activeSharedExhibit = SharedSpatialExhibit(
-      sessionCode = sessionCode,
+      sessionRoomIdentifier = sessionCode,
+      exhibitIdentifier = exhibitIdentifier,
       cloudAnchorId = cloudAnchorId,
       hostDeviceId = "${android.os.Build.MANUFACTURER}_${android.os.Build.MODEL}",
       modelId = modelId,
-      modelScale = modelScale,
-      poseTranslation = floatArrayOf(pose.tx(), pose.ty(), pose.tz()),
-      poseRotation = floatArrayOf(pose.qx(), pose.qy(), pose.qz(), pose.qw()),
-      syncTimestampMs = System.currentTimeMillis()
+      scale = modelScale,
+      position = floatArrayOf(pose.tx(), pose.ty(), pose.tz()),
+      rotation = floatArrayOf(pose.qx(), pose.qy(), pose.qz(), pose.qw()),
+      syncTimestampMs = System.currentTimeMillis(),
+      isRealtimeBackendConnected = false
     )
   }
 

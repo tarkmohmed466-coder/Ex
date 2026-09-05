@@ -374,6 +374,17 @@ class SpatialSurfaceView @JvmOverloads constructor(
                 }
               }
               depthOcclusionManager.processFrameDepth(frame, scratchAnchorPoses)
+              filamentEngine.updateGpuDepthOcclusion(
+                textureId = depthOcclusionManager.depthTextureId,
+                width = depthOcclusionManager.depthWidth,
+                height = depthOcclusionManager.depthHeight,
+                timestampNs = depthOcclusionManager.latestDepthTimestampNs,
+                minDepth = depthOcclusionManager.minDepthMeters,
+                maxDepth = depthOcclusionManager.maxDepthMeters,
+                avgDepth = depthOcclusionManager.averageDepthMeters,
+                isReady = depthOcclusionManager.isDepthTextureReady,
+                occlusionPercentage = depthOcclusionManager.occlusionPercentage
+              )
             }
 
             // Time-based Dynamic LOD evaluation: every ~150ms with zero heap allocations

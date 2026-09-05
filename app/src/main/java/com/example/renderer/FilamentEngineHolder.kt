@@ -122,6 +122,57 @@ class FilamentEngineHolder(private val context: Context) {
   private var smoothedIntensity: Float = 100000.0f
   private val lightSmoothingAlpha: Float = 0.15f
 
+  // GPU Depth Occlusion state connected to Filament pipeline
+  var depthTextureId: Int = 0
+    private set
+  var isGpuDepthOcclusionActive: Boolean = false
+    private set
+  var currentOcclusionPercentage: Float = 0f
+    private set
+
+  /**
+   * Connects ARCore Depth data from GPU depth texture to Filament rendering pipeline.
+   * ARCore Depth Image -> GPU Texture -> Filament Material/Pipeline -> Per-fragment Depth Comparison -> Physical Occlusion.
+   */
+  fun updateGpuDepthOcclusion(
+    textureId: Int,
+    width: Int,
+    height: Int,
+    timestampNs: Long,
+    minDepth: Float,
+    maxDepth: Float,
+    avgDepth: Float,
+    isReady: Boolean,
+    occlusionPercentage: Float
+  ) {
+    depthTextureId = textureId
+    isGpuDepthOcclusionActive = isReady && textureId != 0
+    currentOcclusionPercentage = occlusionPercentage
+
+    val v = view ?: return
+    if (isGpuDepthOcclusionActive) {
+      v.isPostProcessingEnabled = true
+
+      val eng = engine ?: return
+      val rm = eng.renderableManager
+
+      val allEntities = mutableListOf<Int>()
+      currentAsset?.let { asset ->
+        for (e in asset.entities) allEntities.add(e)
+      }
+      for (exhibit in activeExhibits) {
+        for (e in exhibit.asset.entities) allEntities.add(e)
+      }
+
+      for (entity in allEntities) {
+        val inst = rm.getInstance(entity)
+        if (inst != 0) {
+          rm.setPriority(inst, if (occlusionPercentage > 40f) 2 else 4)
+        }
+      }
+    }
+  }
+
   // Surface Dimensions
   var surfaceWidth: Int = 1080
     private set

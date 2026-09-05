@@ -365,10 +365,21 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         cloudAnchorsCount = trackingData.cloudAnchorsCount,
         dominantSemanticLabel = trackingData.semanticsTelemetry.dominantLabel,
         depthConfidenceScore = depthManager?.depthConfidenceScore ?: it.depthConfidenceScore,
+        isDepthConfidenceAvailable = depthManager?.isConfidenceAvailable ?: false,
+        depthConfidencePercentage = depthManager?.depthConfidencePercentage,
+        depthCoveragePercentage = depthManager?.depthCoveragePercentage ?: 0f,
+        vpsAvailability = trackingData.geospatialStatus.vpsAvailability,
         deviceTier = trackingData.certification?.certificationTier ?: it.deviceTier,
+        isGoogleCertifiedDevice = trackingData.certification?.isGoogleCertifiedDevice ?: false,
+        isArCoreSupported = trackingData.certification?.isArCoreSupported ?: true,
+        isArCoreInstalled = trackingData.certification?.isArCoreInstalled ?: true,
+        mrPassthroughSemantics = "Monoscopic Passthrough + Stereoscopic Virtual Rendering",
+        isTrueBinocularPassthrough = false,
         arRecordingStatus = trackingData.recordingTelemetry.recordingStatus,
         environmentalMeshTriangles = trackingData.reconstructionTelemetry.totalTriangles,
         environmentalMeshAreaSqM = trackingData.reconstructionTelemetry.totalSurfaceAreaSqMeters,
+        hasReal3dMeshGeometry = trackingData.reconstructionTelemetry.hasReal3dMeshGeometry,
+        isFull3dSceneReconstruction = trackingData.reconstructionTelemetry.isFull3dSceneReconstruction,
         metricDimensions = modelDimensions
       )
     }
