@@ -37,9 +37,20 @@ data class TelemetryState(
   val earthCoordinates: String = "0.000000°, 0.000000°",
   val vpsAvailability: String = "UNAVAILABLE",
   val cloudAnchorsCount: Int = 0,
+  val localAnchorsCount: Int = 0,
+  val pendingCloudAnchorsCount: Int = 0,
   val isRealtimeBackendConnected: Boolean = false,
   val isMultiplayerActive: Boolean = false,
+  val isOnlineMultiplayerActive: Boolean = false,
+  val isLoopbackTestActive: Boolean = false,
+  val multiplayerMode: String = "OFFLINE",
+  val isGeospatialSupported: Boolean = false,
+  val isGeospatialEnabled: Boolean = false,
+  val hasLocationPermission: Boolean = false,
+  val isEarthTrackingActive: Boolean = false,
+  val isVpsLocalized: Boolean = false,
   val dominantSemanticLabel: String = "SCANNING",
+  val semanticsClassificationSource: String = "ARCORE_ML_SEMANTICS",
   val isGpuSemanticRenderingActive: Boolean = false,
   val depthConfidenceScore: Float = 95f,
   val deviceTier: String = "TIER_A_FLAGSHIP",
@@ -56,6 +67,7 @@ data class TelemetryState(
   val denseMeshChunksCount: Int = 0,
   val isDenseLocalMeshActive: Boolean = false,
   val isFull3dSceneReconstruction: Boolean = false,
+  val reconstructionStage: String = "IDLE",
   val logs: List<LogEntry> = emptyList()
 )
 

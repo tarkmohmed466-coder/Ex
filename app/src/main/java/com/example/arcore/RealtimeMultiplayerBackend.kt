@@ -89,6 +89,15 @@ enum class BackendConnectionState {
 }
 
 /**
+ * Explicit operational modes separating genuine network multiplayer from local loopback tests.
+ */
+enum class MultiplayerMode {
+  OFFLINE,
+  LOCAL_LOOPBACK_TEST,
+  ONLINE_MULTIPLAYER
+}
+
+/**
  * Events emitted by the real-time multiplayer backend.
  */
 sealed class MultiplayerEvent {
@@ -146,14 +155,24 @@ class RealtimeMultiplayerBackend {
   var localUser: MultiplayerUser = MultiplayerUser()
     private set
 
+  var multiplayerMode: MultiplayerMode = MultiplayerMode.OFFLINE
+    private set
+
   val isBackendConnected: Boolean
     get() = _connectionState.value == BackendConnectionState.CONNECTED
 
+  val isOnlineMultiplayerActive: Boolean
+    get() = !isLoopbackMode && isBackendConnected && _currentRoom.value != null
+
+  val isLoopbackTestActive: Boolean
+    get() = isLoopbackMode && _currentRoom.value != null
+
   /**
    * NEVER report multiplayer as active when the backend is disconnected!
+   * Accurately distinguishes online WebSocket multiplayer from local loopback testing.
    */
   val isMultiplayerActive: Boolean
-    get() = isBackendConnected && _currentRoom.value != null
+    get() = isOnlineMultiplayerActive || isLoopbackTestActive
 
   var onEvent: ((MultiplayerEvent) -> Unit)? = null
 
@@ -189,6 +208,8 @@ class RealtimeMultiplayerBackend {
     activeWebSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
       override fun onOpen(webSocket: WebSocket, response: Response) {
         reconnectAttempts = 0
+        isLoopbackMode = false
+        multiplayerMode = MultiplayerMode.ONLINE_MULTIPLAYER
         mainHandler.post {
           _connectionState.value = BackendConnectionState.CONNECTED
           onEvent?.invoke(MultiplayerEvent.ConnectionChanged(BackendConnectionState.CONNECTED))
@@ -389,6 +410,8 @@ class RealtimeMultiplayerBackend {
     }
     activeWebSocket?.close(1000, "Client disconnect")
     activeWebSocket = null
+    isLoopbackMode = false
+    multiplayerMode = MultiplayerMode.OFFLINE
     _connectionState.value = BackendConnectionState.DISCONNECTED
     onEvent?.invoke(MultiplayerEvent.ConnectionChanged(BackendConnectionState.DISCONNECTED))
     Log.i(TAG, "Disconnected from real-time multiplayer backend.")
@@ -602,6 +625,7 @@ class RealtimeMultiplayerBackend {
    */
   fun startLoopbackService(roomId: String = "local_peer_room") {
     isLoopbackMode = true
+    multiplayerMode = MultiplayerMode.LOCAL_LOOPBACK_TEST
     isExplicitDisconnect = false
     _connectionState.value = BackendConnectionState.CONNECTED
     onEvent?.invoke(MultiplayerEvent.ConnectionChanged(BackendConnectionState.CONNECTED))

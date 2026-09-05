@@ -233,12 +233,12 @@ class FilamentEngineHolder(private val context: Context) {
           try { mat.setParameter("u_depthOcclusionActive", 1.0f) } catch (_: Throwable) {}
         }
 
-        // Real GPU fragment occlusion: retain standard rendering pipeline for per-fragment depth testing
-        // Do NOT rely on global occlusionPercentage to hide or threshold an entire object
+        // Real GPU fragment occlusion in Filament's reversed-Z pipeline (near=1.0, far=0.0):
+        // Must use GREATER_EQUAL so closer physical surfaces occlude distant virtual fragments.
         mat.setColorWrite(true)
         mat.setDepthWrite(true)
         mat.setDepthCulling(true)
-        mat.setDepthFunc(TextureSampler.CompareFunction.LESS_EQUAL)
+        mat.setDepthFunc(TextureSampler.CompareFunction.GREATER_EQUAL)
       }
 
       val rm = eng.renderableManager
@@ -256,7 +256,7 @@ class FilamentEngineHolder(private val context: Context) {
           rm.setPriority(inst, 4)
         }
       }
-      isDepthTextureBoundToPipeline = true
+      isDepthTextureBoundToPipeline = filamentDepthTexture != null
     } else {
       val allMaterials = mutableListOf<MaterialInstance>()
       currentAsset?.instance?.materialInstances?.let {
@@ -275,10 +275,28 @@ class FilamentEngineHolder(private val context: Context) {
         mat.setColorWrite(true)
         mat.setDepthWrite(true)
         mat.setDepthCulling(true)
-        mat.setDepthFunc(TextureSampler.CompareFunction.LESS_EQUAL)
+        mat.setDepthFunc(TextureSampler.CompareFunction.GREATER_EQUAL)
       }
       isDepthTextureBoundToPipeline = false
     }
+  }
+
+  /**
+   * Resets GPU depth textures and pipelines on tracking loss or ARCore session recreation.
+   */
+  fun clearGpuDepthAndTrackingResources() {
+    val eng = engine
+    if (eng != null && filamentDepthTexture != null) {
+      try {
+        filamentDepthTexture?.let { eng.destroyTexture(it) }
+      } catch (_: Exception) {}
+      filamentDepthTexture = null
+    }
+    lastImportedTextureId = 0
+    depthTextureId = 0
+    isGpuDepthOcclusionActive = false
+    isDepthTextureBoundToPipeline = false
+    currentOcclusionPercentage = 0f
   }
 
   // Surface Dimensions

@@ -684,6 +684,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
   fun clearModelAndScene() {
     filamentEngine.clearAll()
+    filamentEngine.clearGpuDepthAndTrackingResources()
     for (anchor in activeArAnchors) {
       anchor.detach()
     }
@@ -691,12 +692,15 @@ class SpatialSurfaceView @JvmOverloads constructor(
     spawnedMarkerIds.clear()
     currentSelectedModelId = ""
     currentSelectedModelTitle = ""
+    arCoreSessionManager.handleTrackingLostOrReset(resetSession = false)
     arCoreSessionManager.resetWalkingOrigin()
   }
 
   fun resetView() {
     filamentEngine.resetTransforms()
+    filamentEngine.clearGpuDepthAndTrackingResources()
     clearAnchors()
+    arCoreSessionManager.handleTrackingLostOrReset(resetSession = false)
     arCoreSessionManager.resetWalkingOrigin()
   }
 }

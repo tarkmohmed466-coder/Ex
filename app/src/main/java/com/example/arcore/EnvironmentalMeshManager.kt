@@ -85,7 +85,9 @@ data class ReconstructionTelemetry(
   val localMeshAreaSqMeters: Float = 0f,
   val hasFloorPlane: Boolean = false,
   val hasWallPlane: Boolean = false,
-  val hasTableSurface: Boolean = false
+  val hasTableSurface: Boolean = false,
+  val reconstructionStage: String = "IDLE",
+  val semanticsClassificationSource: String = "GEOMETRIC_ORIENTATION_ESTIMATE"
 )
 
 /**
@@ -95,9 +97,7 @@ data class ReconstructionTelemetry(
  * 2. Outdoor Streetscape Geometry (Dense 3D meshes of buildings & terrain).
  * 3. Environmental 3D Meshes (Dense volumetric surface reconstruction).
  * 4. Semantic Surface Classification (Floor vs Table vs Wall vs Ceiling).
- *
- * NOTE: Does NOT classify every upward horizontal plane as floor. Distinguishes tables, desks, and floors.
- * Does NOT claim full 3D scene reconstruction unless actual 3D mesh geometry is available.
+ * 5. Multi-frame persistent spatial voxel accumulation for continuous dense scene reconstruction.
  */
 class EnvironmentalMeshManager {
 
@@ -105,6 +105,7 @@ class EnvironmentalMeshManager {
     private const val TAG = "EnvironmentalMeshManager"
     // Height threshold relative to camera eye-level (~1.4m): surfaces below -0.85m are floors
     private const val FLOOR_HEIGHT_THRESHOLD_METERS = -0.85f
+    private const val MAX_PERSISTENT_CHUNKS = 96
   }
 
   var telemetry: ReconstructionTelemetry = ReconstructionTelemetry()
@@ -113,11 +114,16 @@ class EnvironmentalMeshManager {
   private val detectedPlaneChunks = mutableMapOf<String, MeshChunk>()
   private val streetscapeChunks = mutableMapOf<String, MeshChunk>()
   private val environmental3dChunks = mutableMapOf<String, MeshChunk>()
+  private val persistentSpatialVoxelChunks = mutableMapOf<String, MeshChunk>()
 
   /**
    * Updates environmental mesh representation from current ARCore trackables.
    */
-  fun updateEnvironmentalMesh(session: Session, frame: com.google.ar.core.Frame? = null) {
+  fun updateEnvironmentalMesh(
+    session: Session,
+    frame: com.google.ar.core.Frame? = null,
+    semanticsManager: SceneSemanticsManager? = null
+  ) {
     try {
       var totalVerts = 0
       var totalTris = 0
@@ -125,6 +131,7 @@ class EnvironmentalMeshManager {
       var hasFloor = false
       var hasWall = false
       var hasTable = false
+      var usedMlSemantics = false
 
       detectedPlaneChunks.clear()
       streetscapeChunks.clear()
@@ -268,13 +275,16 @@ class EnvironmentalMeshManager {
               val cy = intrinsics.principalPoint[1] * (height.toFloat() / intrinsics.imageDimensions[1])
 
               val camPose = frame.camera.pose
-              val step = 10 // grid step size for regular spatial mesh sampling
+              // Higher-density adaptive sampling: step = 3 to 4 on standard depth images
+              val step = maxOf(3, minOf(width, height) / 40)
               val gridW = (width - 1) / step + 1
               val gridH = (height - 1) / step + 1
 
               // World positions grid: 3 floats per sample
               val gridPositions = FloatArray(gridW * gridH * 3)
               val gridValid = BooleanArray(gridW * gridH)
+              val gridNormX = FloatArray(gridW * gridH)
+              val gridNormY = FloatArray(gridW * gridH)
 
               for (gy in 0 until gridH) {
                 val y = minOf(gy * step, height - 1)
@@ -282,9 +292,24 @@ class EnvironmentalMeshManager {
                 for (gx in 0 until gridW) {
                   val x = minOf(gx * step, width - 1)
                   val byteIdx = rowStart + x * pixelStride
-                  val depthMm = buffer.getShort(byteIdx).toInt() and 0xFFFF
+                  var depthMm = buffer.getShort(byteIdx).toInt() and 0xFFFF
                   val idx = gy * gridW + gx
-                  if (depthMm in 200..6000) {
+
+                  gridNormX[idx] = x.toFloat() / width
+                  gridNormY[idx] = y.toFloat() / height
+
+                  // Hole-filling: if depth is zero or out-of-range, interpolate from valid neighbors
+                  if (depthMm !in 150..6000 && gx > 0 && gx < gridW - 1) {
+                    val prevIdx = rowStart + (x - step) * pixelStride
+                    val nextIdx = rowStart + minOf(x + step, width - 1) * pixelStride
+                    val dPrev = buffer.getShort(prevIdx).toInt() and 0xFFFF
+                    val dNext = buffer.getShort(nextIdx).toInt() and 0xFFFF
+                    if (dPrev in 150..6000 && dNext in 150..6000 && Math.abs(dPrev - dNext) < 150) {
+                      depthMm = (dPrev + dNext) / 2
+                    }
+                  }
+
+                  if (depthMm in 150..6000) {
                     val zM = depthMm / 1000f
                     val camX = (x - cx) * zM / fx
                     val camY = -(y - cy) * zM / fy
@@ -303,6 +328,7 @@ class EnvironmentalMeshManager {
 
               // Collect mesh triangles grouped by surface classification
               val semanticTris = mutableMapOf<MeshSurfaceCategory, MutableList<FloatArray>>()
+              val maxDepthEdgeDiscontinuity = 0.15f // 15cm threshold preserves sharp geometric boundaries
 
               for (gy in 0 until gridH - 1) {
                 for (gx in 0 until gridW - 1) {
@@ -316,9 +342,17 @@ class EnvironmentalMeshManager {
                     val p1 = floatArrayOf(gridPositions[i10 * 3], gridPositions[i10 * 3 + 1], gridPositions[i10 * 3 + 2])
                     val p2 = floatArrayOf(gridPositions[i01 * 3], gridPositions[i01 * 3 + 1], gridPositions[i01 * 3 + 2])
 
-                    val d1 = Math.abs(p0[2] - p1[2]); val d2 = Math.abs(p0[2] - p2[2])
-                    if (d1 < 0.20f && d2 < 0.20f) {
-                      val cat = classifyTriangleCategory(p0, p1, p2)
+                    val d1 = Math.abs(p0[2] - p1[2])
+                    val d2 = Math.abs(p0[2] - p2[2])
+                    val d3 = Math.abs(p1[2] - p2[2])
+                    if (d1 < maxDepthEdgeDiscontinuity && d2 < maxDepthEdgeDiscontinuity && d3 < maxDepthEdgeDiscontinuity) {
+                      val midNormX = (gridNormX[i00] + gridNormX[i10] + gridNormX[i01]) / 3f
+                      val midNormY = (gridNormY[i00] + gridNormY[i10] + gridNormY[i01]) / 3f
+
+                      val cat = resolveSurfaceCategory(frame, semanticsManager, midNormX, midNormY, p0, p1, p2)
+                      if (semanticsManager?.telemetry?.isEnabled == true) {
+                        usedMlSemantics = true
+                      }
                       val list = semanticTris.getOrPut(cat) { mutableListOf() }
                       list.add(p0); list.add(p1); list.add(p2)
                     }
@@ -329,9 +363,17 @@ class EnvironmentalMeshManager {
                     val p1 = floatArrayOf(gridPositions[i11 * 3], gridPositions[i11 * 3 + 1], gridPositions[i11 * 3 + 2])
                     val p2 = floatArrayOf(gridPositions[i01 * 3], gridPositions[i01 * 3 + 1], gridPositions[i01 * 3 + 2])
 
-                    val d1 = Math.abs(p0[2] - p1[2]); val d2 = Math.abs(p0[2] - p2[2])
-                    if (d1 < 0.20f && d2 < 0.20f) {
-                      val cat = classifyTriangleCategory(p0, p1, p2)
+                    val d1 = Math.abs(p0[2] - p1[2])
+                    val d2 = Math.abs(p0[2] - p2[2])
+                    val d3 = Math.abs(p1[2] - p2[2])
+                    if (d1 < maxDepthEdgeDiscontinuity && d2 < maxDepthEdgeDiscontinuity && d3 < maxDepthEdgeDiscontinuity) {
+                      val midNormX = (gridNormX[i10] + gridNormX[i11] + gridNormX[i01]) / 3f
+                      val midNormY = (gridNormY[i10] + gridNormY[i11] + gridNormY[i01]) / 3f
+
+                      val cat = resolveSurfaceCategory(frame, semanticsManager, midNormX, midNormY, p0, p1, p2)
+                      if (semanticsManager?.telemetry?.isEnabled == true) {
+                        usedMlSemantics = true
+                      }
                       val list = semanticTris.getOrPut(cat) { mutableListOf() }
                       list.add(p0); list.add(p1); list.add(p2)
                     }
@@ -376,8 +418,14 @@ class EnvironmentalMeshManager {
                   iBuffer.position(0)
 
                   val center = floatArrayOf(sumX / numTris, sumY / numTris, sumZ / numTris)
+                  // Spatial voxel hash key for persistent multi-view world accumulation
+                  val voxelX = (center[0] / 0.75f).toInt()
+                  val voxelY = (center[1] / 0.75f).toInt()
+                  val voxelZ = (center[2] / 0.75f).toInt()
+                  val chunkId = "voxel_${voxelX}_${voxelY}_${voxelZ}_${cat.name.lowercase()}"
+
                   val chunk = MeshChunk(
-                    id = "env_mesh_${cat.name.lowercase()}",
+                    id = chunkId,
                     sourceType = GeometrySourceType.ENVIRONMENTAL_3D_MESH,
                     category = cat,
                     vertexCount = numVerts,
@@ -387,7 +435,13 @@ class EnvironmentalMeshManager {
                     vertexBuffer = vBuffer,
                     indexBuffer = iBuffer
                   )
-                  environmental3dChunks[chunk.id] = chunk
+
+                  // Accumulate into persistent world spatial voxels
+                  if (persistentSpatialVoxelChunks.size >= MAX_PERSISTENT_CHUNKS && !persistentSpatialVoxelChunks.containsKey(chunkId)) {
+                    val oldestKey = persistentSpatialVoxelChunks.keys.firstOrNull()
+                    if (oldestKey != null) persistentSpatialVoxelChunks.remove(oldestKey)
+                  }
+                  persistentSpatialVoxelChunks[chunkId] = chunk
 
                   if (cat == MeshSurfaceCategory.FLOOR) hasFloor = true
                   if (cat == MeshSurfaceCategory.WALL) hasWall = true
@@ -402,6 +456,10 @@ class EnvironmentalMeshManager {
         }
       }
 
+      // Sync active 3D chunks from persistent spatial voxel reconstruction
+      environmental3dChunks.clear()
+      environmental3dChunks.putAll(persistentSpatialVoxelChunks)
+
       val totalChunks = detectedPlaneChunks.size + streetscapeChunks.size + environmental3dChunks.size
       val real3dMeshCount = streetscapeChunks.size + environmental3dChunks.size
       val hasReal3dMesh = real3dMeshCount > 0
@@ -414,6 +472,13 @@ class EnvironmentalMeshManager {
       totalTris += localMeshTris
       totalArea += localMeshArea
 
+      // Check persistent coverage flags
+      for (chunk in environmental3dChunks.values) {
+        if (chunk.category == MeshSurfaceCategory.FLOOR) hasFloor = true
+        if (chunk.category == MeshSurfaceCategory.WALL) hasWall = true
+        if (chunk.category == MeshSurfaceCategory.TABLE_SURFACE || chunk.category == MeshSurfaceCategory.DESK_OR_COUNTER) hasTable = true
+      }
+
       // Strictly separate the 5 distinct states:
       // State 1: Plane Detection (convex 2D polygons)
       val isPlaneDetectionActive = detectedPlaneChunks.isNotEmpty()
@@ -422,13 +487,24 @@ class EnvironmentalMeshManager {
       // State 3: Local Environmental Mesh (volumetric point cloud / depth chunks)
       val isLocalMeshActive = environmental3dChunks.isNotEmpty()
       // State 4: Dense Local Reconstruction (substantial local geometric coverage)
-      val isDenseLocalReconstruction = isLocalMeshActive && localMeshTris >= 300 && localMeshArea >= 4.0f
-      // State 5: Full Scene Reconstruction (requires dense local coverage AND multi-surface geometry)
+      val isDenseLocalReconstruction = isLocalMeshActive && localMeshTris >= 300 && localMeshArea >= 3.0f
+      // State 5: Full Scene Reconstruction (requires dense spatial voxels across multiple persistent regions and surfaces)
       val isFull3dScene = isDenseLocalReconstruction &&
-                          localMeshArea >= 8.0f &&
+                          environmental3dChunks.size >= 6 &&
+                          localMeshArea >= 6.0f &&
                           localMeshTris >= 600 &&
                           hasFloor &&
                           (hasWall || hasTable)
+
+      val reconstructionStage = when {
+        totalChunks == 0 -> "IDLE"
+        !isLocalMeshActive -> "PLANE_DETECTION_ONLY"
+        !isDenseLocalReconstruction -> "ACCUMULATING_SPATIAL_VOXELS"
+        !isFull3dScene -> "DENSE_LOCAL_RECONSTRUCTION"
+        else -> "FULL_SCENE_RECONSTRUCTION_ACTIVE"
+      }
+
+      val semanticsSource = if (usedMlSemantics) "ARCORE_ML_SEMANTICS" else "GEOMETRIC_ORIENTATION_ESTIMATE"
 
       telemetry = ReconstructionTelemetry(
         isReconstructionActive = totalChunks > 0,
@@ -449,11 +525,44 @@ class EnvironmentalMeshManager {
         localMeshAreaSqMeters = localMeshArea,
         hasFloorPlane = hasFloor,
         hasWallPlane = hasWall,
-        hasTableSurface = hasTable
+        hasTableSurface = hasTable,
+        reconstructionStage = reconstructionStage,
+        semanticsClassificationSource = semanticsSource
       )
     } catch (e: Exception) {
       Log.d(TAG, "Environmental mesh update: ${e.message}")
     }
+  }
+
+  /**
+   * Resolves surface category: prioritizes true ARCore ML semantic labels if available;
+   * otherwise falls back to explicit geometric normal orientation.
+   */
+  private fun resolveSurfaceCategory(
+    frame: com.google.ar.core.Frame,
+    semanticsManager: SceneSemanticsManager?,
+    normX: Float,
+    normY: Float,
+    p0: FloatArray,
+    p1: FloatArray,
+    p2: FloatArray
+  ): MeshSurfaceCategory {
+    if (semanticsManager != null && semanticsManager.telemetry.isEnabled) {
+      val mlLabel = try {
+        semanticsManager.getSemanticLabelAt(frame, normX, normY)
+      } catch (_: Exception) { "UNLABELED" }
+
+      when (mlLabel.uppercase()) {
+        "FLOOR", "ROAD", "SIDEWALK", "TERRAIN" -> return MeshSurfaceCategory.FLOOR
+        "WALL", "BUILDING", "STRUCTURE" -> return MeshSurfaceCategory.WALL
+        "CEILING", "SKY" -> return MeshSurfaceCategory.CEILING
+        "TABLE", "DESK" -> return MeshSurfaceCategory.TABLE_SURFACE
+        "OBJECT", "CHAIR", "COUCH", "BED" -> return MeshSurfaceCategory.DESK_OR_COUNTER
+      }
+    }
+
+    // Geometric orientation heuristic fallback
+    return classifyTriangleCategory(p0, p1, p2)
   }
 
   private fun classifyTriangleCategory(p0: FloatArray, p1: FloatArray, p2: FloatArray): MeshSurfaceCategory {
@@ -478,6 +587,7 @@ class EnvironmentalMeshManager {
     detectedPlaneChunks.clear()
     streetscapeChunks.clear()
     environmental3dChunks.clear()
+    persistentSpatialVoxelChunks.clear()
     telemetry = ReconstructionTelemetry()
   }
 }

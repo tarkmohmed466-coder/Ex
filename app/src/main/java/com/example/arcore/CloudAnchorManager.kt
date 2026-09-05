@@ -167,8 +167,28 @@ class CloudAnchorManager(context: Context? = null) {
     }
   }
 
+  /**
+   * Only successfully hosted or resolved anchors qualify as active Cloud Anchors.
+   * Pending operations and local-only anchors are strictly separated.
+   */
   val cloudAnchorsCount: Int
+    get() = activeRecords.values.count {
+      it.state == CloudAnchorLifecycleState.HOSTED_SUCCESS ||
+      it.state == CloudAnchorLifecycleState.RESOLVED_SUCCESS
+    }
+
+  val pendingCloudAnchorsCount: Int
+    get() = activeRecords.values.count {
+      it.state == CloudAnchorLifecycleState.HOSTING_IN_PROGRESS ||
+      it.state == CloudAnchorLifecycleState.RESOLVING_IN_PROGRESS
+    }
+
+  val totalRecordsCount: Int
     get() = activeRecords.size
+
+  fun clear() {
+    clearAll()
+  }
 
   /**
    * Standalone Cloud Anchor Hosting.

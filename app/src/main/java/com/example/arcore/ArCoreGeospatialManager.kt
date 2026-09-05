@@ -25,10 +25,12 @@ import com.google.ar.core.VpsAvailability
  */
 data class GeospatialStatus(
   val isSupported: Boolean = false,
+  val isEnabled: Boolean = false,
   val locationPermissionGranted: Boolean = false,
   val earthState: String = "DISABLED",
   val trackingState: String = "STOPPED",
   val vpsAvailability: String = "UNKNOWN",
+  val isVpsLocalized: Boolean = false,
   val latitude: Double = 0.0,
   val longitude: Double = 0.0,
   val altitudeMeters: Double = 0.0,
@@ -87,6 +89,7 @@ class ArCoreGeospatialManager {
         config.streetscapeGeometryMode = Config.StreetscapeGeometryMode.ENABLED
         status = status.copy(
           isSupported = true,
+          isEnabled = true,
           locationPermissionGranted = true,
           earthState = "ENABLED"
         )
@@ -96,6 +99,7 @@ class ArCoreGeospatialManager {
         config.geospatialMode = Config.GeospatialMode.DISABLED
         status = status.copy(
           isSupported = false,
+          isEnabled = false,
           locationPermissionGranted = true,
           earthState = "UNSUPPORTED"
         )
@@ -137,24 +141,33 @@ class ArCoreGeospatialManager {
               cameraGeospatialPose.longitude
             ) { availability ->
               isVpsCheckPending = false
-              status = status.copy(vpsAvailability = availability.name)
+              val isLocalized = (availability == VpsAvailability.AVAILABLE) && (cameraGeospatialPose.horizontalAccuracy in 0.01..5.0)
+              status = status.copy(
+                vpsAvailability = availability.name,
+                isVpsLocalized = isLocalized
+              )
             }
           } catch (e: Exception) {
             isVpsCheckPending = false
-            status = status.copy(vpsAvailability = "ERROR_NETWORK")
+            status = status.copy(vpsAvailability = "ERROR_NETWORK", isVpsLocalized = false)
           }
         }
 
+        val isLocalized = (status.vpsAvailability == "AVAILABLE") && (cameraGeospatialPose.horizontalAccuracy in 0.01..5.0)
+
         val guidance = when {
-          cameraGeospatialPose.horizontalAccuracy in 0.01..5.0 -> "VPS high-accuracy localization ready"
+          isLocalized -> "VPS localized with high-accuracy pose"
+          cameraGeospatialPose.horizontalAccuracy in 0.01..5.0 -> "High accuracy GPS pose; querying VPS streetscape"
           cameraGeospatialPose.horizontalAccuracy in 5.01..15.0 -> "Refining VPS: Point camera at buildings or landmarks"
           else -> "Localizing Earth pose: Scan physical surroundings"
         }
 
         status = status.copy(
           isSupported = true,
+          isEnabled = true,
           earthState = "EARTH_TRACKING",
           trackingState = trackingName,
+          isVpsLocalized = isLocalized,
           latitude = cameraGeospatialPose.latitude,
           longitude = cameraGeospatialPose.longitude,
           altitudeMeters = cameraGeospatialPose.altitude,
@@ -173,6 +186,7 @@ class ArCoreGeospatialManager {
         }
         status = status.copy(
           trackingState = trackingName,
+          isVpsLocalized = false,
           earthState = if (earthTracking == TrackingState.PAUSED) "EARTH_PAUSED" else "EARTH_STOPPED",
           guidanceMessage = guidance
         )
@@ -238,5 +252,14 @@ class ArCoreGeospatialManager {
   fun clearAnchors() {
     geospatialAnchors.forEach { it.detach() }
     geospatialAnchors.clear()
+  }
+
+  fun clear() {
+    clearAnchors()
+    status = GeospatialStatus(
+      isSupported = status.isSupported,
+      isEnabled = status.isEnabled,
+      locationPermissionGranted = status.locationPermissionGranted
+    )
   }
 }

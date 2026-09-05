@@ -87,10 +87,15 @@ data class ArCoreTrackingData(
   val geospatialStatus: GeospatialStatus = GeospatialStatus(),
   val semanticsTelemetry: SemanticsTelemetry = SemanticsTelemetry(),
   val cloudAnchorsCount: Int = 0,
+  val localAnchorsCount: Int = 0,
+  val pendingCloudAnchorsCount: Int = 0,
   val recordingTelemetry: RecordingTelemetry = RecordingTelemetry(),
   val reconstructionTelemetry: ReconstructionTelemetry = ReconstructionTelemetry(),
   val isRealtimeBackendConnected: Boolean = false,
   val isMultiplayerActive: Boolean = false,
+  val isOnlineMultiplayerActive: Boolean = false,
+  val isLoopbackTestActive: Boolean = false,
+  val multiplayerMode: String = "OFFLINE",
   val certification: DeviceCapabilityCertification? = null,
   val detectedPlanes: List<DetectedPlaneInfo> = emptyList(),
   val detectedImages: List<DetectedImageInfo> = emptyList()
@@ -597,7 +602,7 @@ class ArCoreSessionManager(private val context: Context) {
       semanticsManager.processFrameSemantics(frame)
       facesManager.processFrameFaces(currentSession)
       recordingPlaybackManager.updateFrameState(currentSession)
-      environmentalMeshManager.updateEnvironmentalMesh(currentSession, frame)
+      environmentalMeshManager.updateEnvironmentalMesh(currentSession, frame, semanticsManager)
 
       val trackingData = ArCoreTrackingData(
         trackingState = camera.trackingState,
@@ -617,10 +622,15 @@ class ArCoreSessionManager(private val context: Context) {
         geospatialStatus = geospatialManager.status,
         semanticsTelemetry = semanticsManager.telemetry,
         cloudAnchorsCount = cloudAnchorManager.cloudAnchorsCount,
+        localAnchorsCount = hPlanes + vPlanes,
+        pendingCloudAnchorsCount = cloudAnchorManager.pendingCloudAnchorsCount,
         recordingTelemetry = recordingPlaybackManager.telemetry,
         reconstructionTelemetry = environmentalMeshManager.telemetry,
         isRealtimeBackendConnected = multiplayerBackend.isBackendConnected,
         isMultiplayerActive = multiplayerBackend.isMultiplayerActive,
+        isOnlineMultiplayerActive = multiplayerBackend.isOnlineMultiplayerActive,
+        isLoopbackTestActive = multiplayerBackend.isLoopbackTestActive,
+        multiplayerMode = multiplayerBackend.multiplayerMode.name,
         certification = deviceCertification,
         detectedPlanes = scratchPlaneList,
         detectedImages = scratchImageList
@@ -759,5 +769,31 @@ class ArCoreSessionManager(private val context: Context) {
   fun resetWalkingOrigin() {
     initialCameraPose = null
     totalWalkingDisplacement = 0f
+  }
+
+  /**
+   * Complete lifecycle cleanup when tracking is lost or session is reset.
+   * Flushes spatial meshes, depth occlusion textures, anchor caches, and image tracking.
+   */
+  fun handleTrackingLostOrReset(resetSession: Boolean = false) {
+    Log.i(TAG, "Cleaning up tracking resources (resetSession=$resetSession)...")
+    environmentalMeshManager.clear()
+    depthOcclusionManager.clear()
+    cloudAnchorManager.clear()
+    geospatialManager.clear()
+    for (record in imageTrackingMap.values) {
+      try { record.anchor?.detach() } catch (_: Exception) {}
+    }
+    imageTrackingMap.clear()
+    if (resetSession) {
+      session?.let { s ->
+        try {
+          s.pause()
+          s.resume()
+        } catch (e: Exception) {
+          Log.w(TAG, "Transient session reset pause/resume: ${e.message}")
+        }
+      }
+    }
   }
 }
