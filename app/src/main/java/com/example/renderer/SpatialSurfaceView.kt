@@ -115,6 +115,14 @@ class SpatialSurfaceView @JvmOverloads constructor(
   private var lastDepthTimeMs: Long = 0L
   private var lastLodTimeMs: Long = 0L
 
+  // Retained head pose matrix for graceful tracking loss recovery (no black screen or sudden jump)
+  private val lastValidHeadPoseMatrix = FloatArray(16).apply {
+    android.opengl.Matrix.setIdentityM(this, 0)
+  }
+  private var hasStoredHeadPose: Boolean = false
+  // Map of last valid pose per anchor hash to hold anchors in world space during tracking pause
+  private val anchorLastKnownPoses = mutableMapOf<Int, Pose>()
+
   // Gesture state: seamless finger interaction for Rotate, Move, and Scale
   private var isOneFingerRotateMode: Boolean = false
   private var lastTapTime: Long = 0L
@@ -444,12 +452,25 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
         DisplayMode.MR -> {
           val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
+
+          // Camera passthrough must ALWAYS be rendered even if tracking is PAUSED or STOPPED
           if (frame != null) {
             dualCameraGLSurfaceView?.updateFromArCoreFrame(frame)
+          } else {
+            dualCameraGLSurfaceView?.requestRender()
           }
+
           val hasValidTracking = frame != null && frame.camera.trackingState == TrackingState.TRACKING
-          if (hasValidTracking) {
-            frame!!.camera.getViewMatrix(scratchHeadPoseMatrix, 0)
+          if (hasValidTracking && frame != null) {
+            frame.camera.getViewMatrix(scratchHeadPoseMatrix, 0)
+            System.arraycopy(scratchHeadPoseMatrix, 0, lastValidHeadPoseMatrix, 0, 16)
+            hasStoredHeadPose = true
+            scratchCamForward[0] = -scratchHeadPoseMatrix[2]
+            scratchCamForward[1] = -scratchHeadPoseMatrix[6]
+            scratchCamForward[2] = -scratchHeadPoseMatrix[10]
+          } else if (hasStoredHeadPose) {
+            // Decouple camera stream from tracking: retain last valid head pose during tracking loss
+            System.arraycopy(lastValidHeadPoseMatrix, 0, scratchHeadPoseMatrix, 0, 16)
             scratchCamForward[0] = -scratchHeadPoseMatrix[2]
             scratchCamForward[1] = -scratchHeadPoseMatrix[6]
             scratchCamForward[2] = -scratchHeadPoseMatrix[10]
@@ -462,10 +483,24 @@ class SpatialSurfaceView @JvmOverloads constructor(
             for (i in 0 until activeArAnchors.size) {
               val a = activeArAnchors[i]
               if (a.trackingState == TrackingState.TRACKING) {
+                anchorLastKnownPoses[a.hashCode()] = a.pose
                 scratchAnchorPoses.add(a.pose)
+              } else {
+                anchorLastKnownPoses[a.hashCode()]?.let { scratchAnchorPoses.add(it) }
               }
             }
             depthOcclusionManager.processFrameDepth(frame, scratchAnchorPoses)
+            filamentEngine.updateGpuDepthOcclusion(
+              textureId = depthOcclusionManager.depthTextureId,
+              width = depthOcclusionManager.depthWidth,
+              height = depthOcclusionManager.depthHeight,
+              timestampNs = depthOcclusionManager.latestDepthTimestampNs,
+              minDepth = depthOcclusionManager.minDepthMeters,
+              maxDepth = depthOcclusionManager.maxDepthMeters,
+              avgDepth = depthOcclusionManager.averageDepthMeters,
+              isReady = depthOcclusionManager.isDepthTextureReady,
+              occlusionPercentage = depthOcclusionManager.occlusionPercentage
+            )
           }
 
           // Synchronize all exhibit transforms with finger gestures (rotation, scale, position)
@@ -477,9 +512,14 @@ class SpatialSurfaceView @JvmOverloads constructor(
             val primaryAnchor = activeArAnchors.lastOrNull()
             if (primaryAnchor != null) {
               if (primaryAnchor.trackingState == TrackingState.TRACKING) {
+                anchorLastKnownPoses[primaryAnchor.hashCode()] = primaryAnchor.pose
                 filamentEngine.updateAnchorPose(currentAsset, primaryAnchor.pose)
+              } else {
+                // Hold at last valid pose during tracking pause or loss
+                anchorLastKnownPoses[primaryAnchor.hashCode()]?.let { lastPose ->
+                  filamentEngine.updateAnchorPose(currentAsset, lastPose)
+                }
               }
-              // Freeze when tracking lost
             } else {
               filamentEngine.updateUnanchoredPose(currentAsset, latestTrackingData.cameraPosition, scratchCamForward)
             }
@@ -490,7 +530,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
           filamentEngine.renderStereoFrame(
             frameTimeNanos,
             ipdMeters,
-            if (hasValidTracking) scratchHeadPoseMatrix else null
+            if (hasValidTracking || hasStoredHeadPose) scratchHeadPoseMatrix else null
           )
         }
       }

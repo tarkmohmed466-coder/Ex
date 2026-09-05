@@ -118,7 +118,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
 
   init {
     setEGLContextClientVersion(2)
-    setPreserveEGLContextOnPause(true)
+    setEGLConfigChooser(8, 8, 8, 8, 16, 0)
     setRenderer(this)
     renderMode = RENDERMODE_WHEN_DIRTY
     android.opengl.Matrix.setIdentityM(texMatrix, 0)
@@ -255,12 +255,13 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
       GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
       GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
-      val st = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+      val st = try {
+        SurfaceTexture(textureId)
+      } catch (e: Exception) {
+        Log.w(TAG, "Direct SurfaceTexture(textureId) fallback: ${e.message}")
         SurfaceTexture(false).apply {
           attachToGLContext(textureId)
         }
-      } else {
-        SurfaceTexture(textureId)
       }
       st.setOnFrameAvailableListener(this)
       surfaceTexture = st

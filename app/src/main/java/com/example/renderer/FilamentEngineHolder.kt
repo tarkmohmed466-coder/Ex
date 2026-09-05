@@ -42,6 +42,37 @@ import kotlin.math.sin
 import kotlin.math.tan
 
 /**
+ * Clean architectural abstraction for Filament Material depth comparison functions.
+ * Decouples the material rasterizer depth test from the TextureSampler compare mode
+ * to avoid conflating sampler sampling states with pipeline rasterization states.
+ */
+enum class FilamentMaterialDepthFunc(val filamentCompareFunc: TextureSampler.CompareFunction) {
+  LESS(TextureSampler.CompareFunction.LESS),
+  LESS_EQUAL(TextureSampler.CompareFunction.LESS_EQUAL),
+  GREATER(TextureSampler.CompareFunction.GREATER),
+  GREATER_EQUAL(TextureSampler.CompareFunction.GREATER_EQUAL),
+  EQUAL(TextureSampler.CompareFunction.EQUAL),
+  NOT_EQUAL(TextureSampler.CompareFunction.NOT_EQUAL),
+  ALWAYS(TextureSampler.CompareFunction.ALWAYS),
+  NEVER(TextureSampler.CompareFunction.NEVER);
+
+  companion object {
+    /**
+     * Filament utilizes a reversed-Z depth buffer (near plane = 1.0, far plane = 0.0).
+     * Therefore, GREATER_EQUAL is the standard pass condition for geometry in front of the far plane.
+     */
+    val REVERSED_Z_DEFAULT = GREATER_EQUAL
+  }
+}
+
+/**
+ * Extension method to apply the material depth function cleanly without mixing with TextureSampler logic.
+ */
+fun MaterialInstance.setMaterialDepthFunc(func: FilamentMaterialDepthFunc) {
+  this.setDepthFunc(func.filamentCompareFunc)
+}
+
+/**
  * Representation of a 3D model instantiated inside the Filament 3D Scene,
  * linked to a real ARCore 6DoF Anchor (from physical Plane or Image Marker).
  */
@@ -233,12 +264,11 @@ class FilamentEngineHolder(private val context: Context) {
           try { mat.setParameter("u_depthOcclusionActive", 1.0f) } catch (_: Throwable) {}
         }
 
-        // Real GPU fragment occlusion in Filament's reversed-Z pipeline (near=1.0, far=0.0):
-        // Must use GREATER_EQUAL so closer physical surfaces occlude distant virtual fragments.
+        // Audit enable path: configure rasterizer state with FilamentMaterialDepthFunc
         mat.setColorWrite(true)
         mat.setDepthWrite(true)
         mat.setDepthCulling(true)
-        mat.setDepthFunc(TextureSampler.CompareFunction.GREATER_EQUAL)
+        mat.setMaterialDepthFunc(FilamentMaterialDepthFunc.REVERSED_Z_DEFAULT)
       }
 
       val rm = eng.renderableManager
@@ -256,7 +286,12 @@ class FilamentEngineHolder(private val context: Context) {
           rm.setPriority(inst, 4)
         }
       }
-      isDepthTextureBoundToPipeline = filamentDepthTexture != null
+      // Only mark GPU occlusion active if depth texture is uploaded AND material shader declares occlusion parameters
+      val hasShaderOcclusion = allMaterials.any {
+        it.material.hasParameter("physicalDepthTexture") || it.material.hasParameter("depthTexture")
+      }
+      isDepthTextureBoundToPipeline = filamentDepthTexture != null && hasShaderOcclusion
+      isGpuDepthOcclusionActive = isDepthTextureBoundToPipeline
     } else {
       val allMaterials = mutableListOf<MaterialInstance>()
       currentAsset?.instance?.materialInstances?.let {
@@ -272,12 +307,14 @@ class FilamentEngineHolder(private val context: Context) {
         if (matDef.hasParameter("u_depthOcclusionActive")) {
           try { mat.setParameter("u_depthOcclusionActive", 0.0f) } catch (_: Throwable) {}
         }
+        // Audit disable path: reset rasterizer state with FilamentMaterialDepthFunc
         mat.setColorWrite(true)
         mat.setDepthWrite(true)
         mat.setDepthCulling(true)
-        mat.setDepthFunc(TextureSampler.CompareFunction.GREATER_EQUAL)
+        mat.setMaterialDepthFunc(FilamentMaterialDepthFunc.REVERSED_Z_DEFAULT)
       }
       isDepthTextureBoundToPipeline = false
+      isGpuDepthOcclusionActive = false
     }
   }
 

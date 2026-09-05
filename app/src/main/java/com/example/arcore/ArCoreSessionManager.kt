@@ -773,19 +773,21 @@ class ArCoreSessionManager(private val context: Context) {
 
   /**
    * Complete lifecycle cleanup when tracking is lost or session is reset.
-   * Flushes spatial meshes, depth occlusion textures, anchor caches, and image tracking.
+   * On temporary tracking loss (resetSession = false), preserves persistent spatial voxels,
+   * depth textures, and anchor caches for seamless recovery.
+   * Only flushes resources on hard session reset (resetSession = true).
    */
   fun handleTrackingLostOrReset(resetSession: Boolean = false) {
-    Log.i(TAG, "Cleaning up tracking resources (resetSession=$resetSession)...")
-    environmentalMeshManager.clear()
-    depthOcclusionManager.clear()
-    cloudAnchorManager.clear()
-    geospatialManager.clear()
-    for (record in imageTrackingMap.values) {
-      try { record.anchor?.detach() } catch (_: Exception) {}
-    }
-    imageTrackingMap.clear()
     if (resetSession) {
+      Log.i(TAG, "Hard session reset: cleaning up tracking resources...")
+      environmentalMeshManager.clear()
+      depthOcclusionManager.clear()
+      cloudAnchorManager.clear()
+      geospatialManager.clear()
+      for (record in imageTrackingMap.values) {
+        try { record.anchor?.detach() } catch (_: Exception) {}
+      }
+      imageTrackingMap.clear()
       session?.let { s ->
         try {
           s.pause()
@@ -794,6 +796,10 @@ class ArCoreSessionManager(private val context: Context) {
           Log.w(TAG, "Transient session reset pause/resume: ${e.message}")
         }
       }
+    } else {
+      Log.i(TAG, "Spatial tracking paused or lost: retaining depth, mesh, and anchor caches for seamless recovery.")
+      // Retain resources during temporary tracking loss so anchors remain at their last valid pose
+      // and camera passthrough stream remains uninterrupted.
     }
   }
 }

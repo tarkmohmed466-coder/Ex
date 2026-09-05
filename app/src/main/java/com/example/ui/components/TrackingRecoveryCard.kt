@@ -20,9 +20,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -50,6 +52,7 @@ fun TrackingRecoveryCard(
   isVisible: Boolean,
   trackingStatus: String,
   onRecenterClick: () -> Unit,
+  onDismiss: (() -> Unit)? = null,
   modifier: Modifier = Modifier
 ) {
   AnimatedVisibility(
@@ -102,6 +105,22 @@ fun TrackingRecoveryCard(
               fontSize = 12.sp,
               color = Color(0xFF94A3B8)
             )
+          }
+
+          if (onDismiss != null) {
+            IconButton(
+              onClick = onDismiss,
+              modifier = Modifier
+                .size(28.dp)
+                .testTag("dismiss_tracking_card_button")
+            ) {
+              Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Dismiss",
+                tint = Color(0xFF94A3B8),
+                modifier = Modifier.size(18.dp)
+              )
+            }
           }
         }
 
