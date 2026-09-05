@@ -194,44 +194,51 @@ class FilamentEngineHolder(private val context: Context) {
         }
       }
 
-      // 3. Bind depth texture & comparison parameters to GPU materials
+      // 3. Bind depth texture & comparison parameters ONLY to GPU materials that declare them
       for (mat in allMaterials) {
-        try {
+        val matDef = mat.material
+        if (matDef.hasParameter("depthTexture")) {
           filamentDepthTexture?.let { tex ->
             depthTextureSampler?.let { sampler ->
-              mat.setParameter("depthTexture", tex, sampler)
-              mat.setParameter("physicalDepthTexture", tex, sampler)
+              try {
+                mat.setParameter("depthTexture", tex, sampler)
+              } catch (e: Exception) {
+                Log.w(TAG, "Notice setting depthTexture: ${e.message}")
+              }
             }
           }
-        } catch (_: Throwable) {}
-
-        try {
-          mat.setParameter("u_minPhysicalDepth", minDepth)
-          mat.setParameter("u_maxPhysicalDepth", maxDepth)
-          mat.setParameter("u_avgPhysicalDepth", avgDepth)
-          mat.setParameter("u_depthOcclusionActive", 1.0f)
-        } catch (_: Throwable) {}
-
-        // Real GPU per-fragment depth comparison:
-        // When real physical depth is closer than virtual elements, discard / occlude virtual fragments
-        if (occlusionPercentage > 85f) {
-          // Foreground physical obstacle completely occludes virtual object: discard fragments
-          mat.setColorWrite(false)
-          mat.setDepthWrite(false)
-          mat.setMaskThreshold(1.0f)
-        } else if (occlusionPercentage > 0f) {
-          mat.setColorWrite(true)
-          mat.setDepthWrite(true)
-          mat.setMaskThreshold((occlusionPercentage / 100f).coerceIn(0.0f, 0.95f))
-          mat.setDepthCulling(true)
-          mat.setDepthFunc(TextureSampler.CompareFunction.LESS_EQUAL)
-        } else {
-          mat.setColorWrite(true)
-          mat.setDepthWrite(true)
-          mat.setMaskThreshold(0.0f)
-          mat.setDepthCulling(true)
-          mat.setDepthFunc(TextureSampler.CompareFunction.LESS_EQUAL)
         }
+        if (matDef.hasParameter("physicalDepthTexture")) {
+          filamentDepthTexture?.let { tex ->
+            depthTextureSampler?.let { sampler ->
+              try {
+                mat.setParameter("physicalDepthTexture", tex, sampler)
+              } catch (e: Exception) {
+                Log.w(TAG, "Notice setting physicalDepthTexture: ${e.message}")
+              }
+            }
+          }
+        }
+
+        if (matDef.hasParameter("u_minPhysicalDepth")) {
+          try { mat.setParameter("u_minPhysicalDepth", minDepth) } catch (_: Throwable) {}
+        }
+        if (matDef.hasParameter("u_maxPhysicalDepth")) {
+          try { mat.setParameter("u_maxPhysicalDepth", maxDepth) } catch (_: Throwable) {}
+        }
+        if (matDef.hasParameter("u_avgPhysicalDepth")) {
+          try { mat.setParameter("u_avgPhysicalDepth", avgDepth) } catch (_: Throwable) {}
+        }
+        if (matDef.hasParameter("u_depthOcclusionActive")) {
+          try { mat.setParameter("u_depthOcclusionActive", 1.0f) } catch (_: Throwable) {}
+        }
+
+        // Real GPU fragment occlusion: retain standard rendering pipeline for per-fragment depth testing
+        // Do NOT rely on global occlusionPercentage to hide or threshold an entire object
+        mat.setColorWrite(true)
+        mat.setDepthWrite(true)
+        mat.setDepthCulling(true)
+        mat.setDepthFunc(TextureSampler.CompareFunction.LESS_EQUAL)
       }
 
       val rm = eng.renderableManager
@@ -246,11 +253,30 @@ class FilamentEngineHolder(private val context: Context) {
       for (entity in allEntities) {
         val inst = rm.getInstance(entity)
         if (inst != 0) {
-          rm.setPriority(inst, if (occlusionPercentage > 40f) 2 else 4)
+          rm.setPriority(inst, 4)
         }
       }
       isDepthTextureBoundToPipeline = true
     } else {
+      val allMaterials = mutableListOf<MaterialInstance>()
+      currentAsset?.instance?.materialInstances?.let {
+        for (m in it) allMaterials.add(m)
+      }
+      for (exhibit in activeExhibits) {
+        exhibit.asset.instance?.materialInstances?.let {
+          for (m in it) allMaterials.add(m)
+        }
+      }
+      for (mat in allMaterials) {
+        val matDef = mat.material
+        if (matDef.hasParameter("u_depthOcclusionActive")) {
+          try { mat.setParameter("u_depthOcclusionActive", 0.0f) } catch (_: Throwable) {}
+        }
+        mat.setColorWrite(true)
+        mat.setDepthWrite(true)
+        mat.setDepthCulling(true)
+        mat.setDepthFunc(TextureSampler.CompareFunction.LESS_EQUAL)
+      }
       isDepthTextureBoundToPipeline = false
     }
   }

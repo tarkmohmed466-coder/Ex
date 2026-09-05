@@ -61,8 +61,14 @@ object SpatialModelValidator {
     var meshCount = 1
     var vertCount = model?.vertexCount ?: 0
     var indCount = model?.triangleCount?.times(3) ?: 0
-    var animTracks = if (model?.hasAnimations == true) 1 else 0
+    var animTracks = 0
     var hasMorphTargets = false
+    var hasNormals = false
+    var hasUvs = false
+    var hasColors = false
+    var hasJoints = false
+    var hasWeights = false
+    var hasSkinningBones = false
 
     var w = 1.0f
     var h = 1.0f
@@ -106,11 +112,22 @@ object SpatialModelValidator {
                 }
               }
 
-              // Check animations & morph targets
+              // Check animations & channels
               val animArray = gltfJson.optJSONArray("animations")
               if (animArray != null && animArray.length() > 0) {
-                animTracks = animArray.length()
-                notes.add("glTF animations detected: $animTracks track(s)")
+                var validTracks = 0
+                for (i in 0 until animArray.length()) {
+                  val animObj = animArray.optJSONObject(i) ?: continue
+                  val channels = animObj.optJSONArray("channels")
+                  val samplers = animObj.optJSONArray("samplers")
+                  if (channels != null && channels.length() > 0 && samplers != null && samplers.length() > 0) {
+                    validTracks++
+                  }
+                }
+                animTracks = validTracks
+                if (animTracks > 0) {
+                  notes.add("glTF animations detected: $animTracks track(s)")
+                }
               }
 
               // Extract real Bounding Box from accessors (POSITION accessor)
@@ -146,18 +163,41 @@ object SpatialModelValidator {
                 }
               }
 
-              // Check for morph targets in meshes
+              // Inspect mesh primitives for attributes, indices, morph targets
               if (meshes != null && meshes.length() > 0) {
-                val firstMesh = meshes.optJSONObject(0)
-                val prims = firstMesh?.optJSONArray("primitives")
-                if (prims != null && prims.length() > 0) {
-                  val firstPrim = prims.optJSONObject(0)
-                  if (firstPrim?.has("targets") == true) {
-                    hasMorphTargets = true
-                    notes.add("Morph targets / blend shapes detected in primitive")
+                for (mIdx in 0 until meshes.length()) {
+                  val meshObj = meshes.optJSONObject(mIdx) ?: continue
+                  val prims = meshObj.optJSONArray("primitives") ?: continue
+                  for (pIdx in 0 until prims.length()) {
+                    val prim = prims.optJSONObject(pIdx) ?: continue
+                    val attrs = prim.optJSONObject("attributes")
+                    if (attrs != null) {
+                      if (attrs.has("NORMAL")) hasNormals = true
+                      if (attrs.has("TEXCOORD_0") || attrs.has("TEXCOORD_1")) hasUvs = true
+                      if (attrs.has("COLOR_0") || attrs.has("COLOR_1")) hasColors = true
+                      if (attrs.has("JOINTS_0") || attrs.has("JOINTS_1")) hasJoints = true
+                      if (attrs.has("WEIGHTS_0") || attrs.has("WEIGHTS_1")) hasWeights = true
+                    }
+                    if (prim.has("targets")) {
+                      hasMorphTargets = true
+                      notes.add("Morph targets / blend shapes detected in primitive")
+                    }
+                    if (prim.has("indices") && accessors != null) {
+                      val idxAccessorIndex = prim.optInt("indices", -1)
+                      if (idxAccessorIndex in 0 until accessors.length()) {
+                        val indAcc = accessors.optJSONObject(idxAccessorIndex)
+                        if (indAcc != null) {
+                          indCount = indAcc.optInt("count", indCount)
+                        }
+                      }
+                    }
                   }
                 }
               }
+
+              val skinsArray = gltfJson.optJSONArray("skins")
+              val hasSkins = skinsArray != null && skinsArray.length() > 0
+              hasSkinningBones = hasSkins || (hasJoints && hasWeights)
 
               if (foundBounds) {
                 notes.add("Real GLB Bounding Box: ${String.format("%.2f", w)}m x ${String.format("%.2f", h)}m x ${String.format("%.2f", d)}m")
@@ -207,10 +247,10 @@ object SpatialModelValidator {
       meshPrimitiveCount = meshCount,
       vertexCount = vertCount,
       indexCount = indCount,
-      hasNormals = true,
-      hasUvs = true,
-      hasColors = true,
-      hasSkinningBones = animTracks > 0,
+      hasNormals = hasNormals,
+      hasUvs = hasUvs,
+      hasColors = hasColors,
+      hasSkinningBones = hasSkinningBones,
       hasMorphTargets = hasMorphTargets,
       animationTrackCount = animTracks,
       pbrMaterialType = "Filament gltfio Metallic-Roughness PBR",

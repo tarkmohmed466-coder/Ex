@@ -49,8 +49,8 @@ data class SpatialModel(
   val triangleCount: Int,
   val isCustomLoaded: Boolean = false,
   val meshes: List<SpatialMesh> = emptyList(),
-  val hasAnimations: Boolean = true,
-  val animationDurationSec: Float = 4.0f
+  val hasAnimations: Boolean = false,
+  val animationDurationSec: Float = 0.0f
 )
 
 /**

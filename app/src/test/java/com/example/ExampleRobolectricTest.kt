@@ -118,8 +118,70 @@ class ExampleRobolectricTest {
 
     assertEquals(objectModeBuffer!!.capacity(), arModeBuffer!!.capacity())
     assertEquals(arModeBuffer.capacity(), mrModeBuffer!!.capacity())
-    assertEquals(drone.vertexCount, 1840)
-    assertEquals(drone.triangleCount, 920)
+
+    // Data-driven validation against actual GLB structure
+    val report = com.example.engine.SpatialModelValidator.validateGlbBuffer(objectModeBuffer, drone)
+    assertTrue("Drone GLB must be valid glTF 2.0", report.isValidGltf)
+    assertEquals("Drone vertex count must match GLB geometry", report.vertexCount, drone.vertexCount)
+    assertEquals("Drone triangle count must match GLB index count", report.indexCount / 3, drone.triangleCount)
+    assertEquals("Drone actual vertices count", 160, drone.vertexCount)
+    assertEquals("Drone actual triangles count", 140, drone.triangleCount)
+    org.junit.Assert.assertFalse("Procedural drone has no animation tracks", drone.hasAnimations)
+    org.junit.Assert.assertFalse("Procedural drone has no skinning bones", report.hasSkinningBones)
+  }
+
+  @Test
+  fun `verify data-driven preset model geometry and animation metadata`() {
+    val models = GltfAssetFactory.getPresetModels()
+    for (model in models) {
+      val buffer = GltfAssetFactory.getPresetGlbBuffer(model.id)
+      assertNotNull("GLB buffer for ${model.id} should not be null", buffer)
+      val report = com.example.engine.SpatialModelValidator.validateGlbBuffer(buffer!!, model)
+
+      assertTrue("Model ${model.id} must be valid glTF", report.isValidGltf)
+      assertTrue("Model ${model.id} vertices must be > 0", report.vertexCount > 0)
+      assertTrue("Model ${model.id} indices must be > 0", report.indexCount > 0)
+      assertEquals("Model ${model.id} vertexCount must match GLB", model.vertexCount, report.vertexCount)
+      assertEquals("Model ${model.id} triangleCount must match GLB", model.triangleCount, report.indexCount / 3)
+      org.junit.Assert.assertFalse("Model ${model.id} should not report fictional animations", model.hasAnimations)
+      assertEquals("Model ${model.id} animationTrackCount should be 0", 0, report.animationTrackCount)
+      org.junit.Assert.assertFalse("Model ${model.id} should not have skinning bones", report.hasSkinningBones)
+    }
+  }
+
+  @Test
+  fun `verify depth occlusion manager initial state and confidence semantics`() {
+    val depthManager = com.example.arcore.DepthOcclusionManager()
+    org.junit.Assert.assertFalse("Depth texture should not be ready initially", depthManager.isDepthTextureReady)
+    org.junit.Assert.assertFalse("Depth confidence should not be available initially", depthManager.isConfidenceAvailable)
+    assertNull("Depth confidence percentage should be null when confidence image absent", depthManager.depthConfidencePercentage)
+    assertEquals("Depth coverage percentage should be 0 initially", 0f, depthManager.depthCoveragePercentage, 0.001f)
+  }
+
+  @Test
+  fun `verify cloud anchor manager operates independently of realtime multiplayer backend`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val cloudManager = com.example.arcore.CloudAnchorManager(context)
+    org.junit.Assert.assertFalse("Realtime backend should not be connected by default", cloudManager.isRealtimeBackendConnected)
+    org.junit.Assert.assertFalse("Multiplayer should remain inactive without realtime backend", cloudManager.isMultiplayerActive)
+    assertEquals("Cloud anchors count should start at zero", 0, cloudManager.cloudAnchorsCount)
+  }
+
+  @Test
+  fun `verify mr mode semantics and device certification telemetry`() {
+    val app = ApplicationProvider.getApplicationContext<Application>()
+    val viewModel = SpatialViewModel(app)
+    val telemetry = viewModel.telemetry.value
+
+    assertEquals(
+      "Monoscopic Passthrough + Stereoscopic Virtual Rendering",
+      telemetry.mrPassthroughSemantics
+    )
+    org.junit.Assert.assertFalse("True binocular hardware capture is not claimed", telemetry.isTrueBinocularPassthrough)
+    org.junit.Assert.assertFalse("Google certified device should not be claimed from hardcoded string", telemetry.isGoogleCertifiedDevice)
+    org.junit.Assert.assertFalse("Realtime backend should start disconnected", telemetry.isRealtimeBackendConnected)
+    org.junit.Assert.assertFalse("Multiplayer should start inactive", telemetry.isMultiplayerActive)
+    org.junit.Assert.assertFalse("Full 3D scene reconstruction requires dense local coverage", telemetry.isFull3dSceneReconstruction)
   }
 
   @Test

@@ -41,69 +41,59 @@ jobs:
             touch .env
           fi
 
-      - name: Grant execute permissions for gradlew (if present)
+      - name: Verify and install required Android SDK
         run: |
-          if [ -f gradlew ]; then
-            chmod +x gradlew
+          echo "=== Verifying Android SDK Platform 36 & Build Tools ==="
+          if [ -z "$ANDROID_HOME" ]; then
+            export ANDROID_HOME="/usr/local/lib/android/sdk"
           fi
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" || true
+
+      - name: Verify Gradle Wrapper integrity
+        run: |
+          echo "=== Verifying Gradle Wrapper ==="
+          if [ ! -f gradlew ]; then
+            echo "ERROR: gradlew executable script is missing from repository root!"
+            exit 1
+          fi
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "ERROR: gradle/wrapper/gradle-wrapper.jar is missing or corrupted!"
+            exit 1
+          fi
+          chmod +x gradlew
+          echo "Gradle wrapper verified successfully."
 
       # Mandatory Deterministic CI Sequence: clean -> test -> compile -> process resources -> process manifest -> assemble -> verify
 
       - name: 1. Clean Workspace (clean)
         run: |
-          if [ -f gradlew ]; then
-            ./gradlew clean --stacktrace
-          else
-            gradle clean --stacktrace
-          fi
+          ./gradlew clean --stacktrace
 
       - name: 2. Verify KSP Generation (ksp)
         run: |
-          if [ -f gradlew ]; then
-            ./gradlew :app:kspDebugKotlin --stacktrace
-          else
-            gradle :app:kspDebugKotlin --stacktrace
-          fi
+          ./gradlew :app:kspDebugKotlin --stacktrace
 
       - name: 3. Run Unit Tests (test)
         run: |
-          if [ -f gradlew ]; then
-            ./gradlew :app:testDebugUnitTest --stacktrace
-          else
-            gradle :app:testDebugUnitTest --stacktrace
-          fi
+          ./gradlew :app:testDebugUnitTest --stacktrace
 
       - name: 4. Compile Kotlin and Java (compile)
         run: |
-          if [ -f gradlew ]; then
-            ./gradlew :app:compileDebugKotlin :app:compileDebugJavaWithJavac --stacktrace
-          else
-            gradle :app:compileDebugKotlin :app:compileDebugJavaWithJavac --stacktrace
-          fi
+          ./gradlew :app:compileDebugKotlin :app:compileDebugJavaWithJavac --stacktrace
 
       - name: 5. Process Resources (process)
         run: |
-          if [ -f gradlew ]; then
-            ./gradlew :app:processDebugResources --stacktrace
-          else
-            gradle :app:processDebugResources --stacktrace
-          fi
+          ./gradlew :app:processDebugResources --stacktrace
 
       - name: 6. Process Main Manifest (manifest)
         run: |
-          if [ -f gradlew ]; then
-            ./gradlew :app:processDebugMainManifest --stacktrace
-          else
-            gradle :app:processDebugMainManifest --stacktrace
-          fi
+          ./gradlew :app:processDebugMainManifest --stacktrace
 
       - name: 7. Assemble Debug APK (assemble)
         run: |
-          if [ -f gradlew ]; then
-            ./gradlew :app:assembleDebug --stacktrace
-          else
-            gradle :app:assembleDebug --stacktrace
-          fi
+          ./gradlew :app:assembleDebug --stacktrace
 
       - name: 8. Verify Artifacts (verify)
         run: |
@@ -120,6 +110,12 @@ jobs:
             echo "ERROR: APK file size is suspiciously small: $APK_SIZE bytes"
             exit 1
           fi
+          echo "Validating APK ZIP integrity..."
+          unzip -t "$APK_PATH" > /dev/null
+          echo "Checking for AndroidManifest.xml..."
+          unzip -l "$APK_PATH" | grep -q "AndroidManifest.xml"
+          echo "Checking for compiled dex files..."
+          unzip -l "$APK_PATH" | grep -q "classes.dex"
           echo "Verification SUCCESS: $APK_PATH passed all integrity checks."
 
       - name: Upload Debug APK Artifact

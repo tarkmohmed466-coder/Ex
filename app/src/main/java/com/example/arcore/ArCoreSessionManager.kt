@@ -656,25 +656,42 @@ class ArCoreSessionManager(private val context: Context) {
   fun switchCameraFacing(isFrontFaceTracking: Boolean): Boolean {
     val s = session ?: return false
     return try {
+      // 1. Pause session
       s.pause()
+
+      // 2. Release/close previously acquired frame images and depth resources
+      depthOcclusionManager.clear()
+      lastFrame = null
+
       val config = s.config
       val success = if (isFrontFaceTracking) {
-        // Front-camera face tracking requested:
-        // 1. Configure AugmentedFaceMode.MESH3D
+        // 3. Set front camera configuration
+        val camSuccess = facesManager.selectFrontCameraConfig(s)
+
+        // 4. Configure MESH3D and explicitly disable unsupported rear-only features
         facesManager.configureFaceMode(s, config, true)
         config.planeFindingMode = Config.PlaneFindingMode.DISABLED
+        config.depthMode = Config.DepthMode.DISABLED
+        config.instantPlacementMode = Config.InstantPlacementMode.DISABLED
+
+        // 5. Configure session again
         s.configure(config)
-        // 2. Switch camera to front
-        facesManager.selectFrontCameraConfig(s)
+        camSuccess
       } else {
-        // Returning to rear-camera AR:
-        // 1. Restore rear-camera configuration
+        // 3. Set rear camera configuration
+        val camSuccess = facesManager.selectBackCameraConfig(s)
+
+        // 4. Disable face tracking and restore rear-camera capabilities
         facesManager.configureFaceMode(s, config, false)
         config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+        depthOcclusionManager.configureDepthMode(s, config)
+
+        // 5. Configure session again
         s.configure(config)
-        // 2. Switch camera back to rear
-        facesManager.selectBackCameraConfig(s)
+        camSuccess
       }
+
+      // 6. Resume session
       s.resume()
       Log.i(TAG, "Switched camera facing (isFront=$isFrontFaceTracking, success=$success)")
       success

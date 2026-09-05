@@ -52,6 +52,9 @@ data class TelemetryState(
   val environmentalMeshTriangles: Int = 0,
   val environmentalMeshAreaSqM: Float = 0f,
   val hasReal3dMeshGeometry: Boolean = false,
+  val streetscapeGeometriesCount: Int = 0,
+  val denseMeshChunksCount: Int = 0,
+  val isDenseLocalMeshActive: Boolean = false,
   val isFull3dSceneReconstruction: Boolean = false,
   val logs: List<LogEntry> = emptyList()
 )

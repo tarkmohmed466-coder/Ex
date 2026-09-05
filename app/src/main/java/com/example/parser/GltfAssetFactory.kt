@@ -93,44 +93,44 @@ object GltfAssetFactory {
         title = "Spatial Drone X-1",
         description = "Quad-rotor drone with lidar sensor pod and carbon-composite chassis.",
         category = "Robotics & Aerial",
-        vertexCount = 1840,
-        triangleCount = 920,
+        vertexCount = 160,
+        triangleCount = 140,
         isCustomLoaded = false,
-        hasAnimations = true,
-        animationDurationSec = 3.5f
+        hasAnimations = false,
+        animationDurationSec = 0.0f
       ),
       SpatialModel(
         id = "scifi_core_v1",
         title = "Quantum Fusion Core",
         description = "Magnetic confinement reactor with glowing plasma containment field.",
         category = "Energy & Sci-Fi",
-        vertexCount = 2400,
-        triangleCount = 1200,
+        vertexCount = 703,
+        triangleCount = 1216,
         isCustomLoaded = false,
-        hasAnimations = true,
-        animationDurationSec = 4.0f
+        hasAnimations = false,
+        animationDurationSec = 0.0f
       ),
       SpatialModel(
         id = "mech_rig_v1",
         title = "Cybernetic Mech",
         description = "Heavy bipedal frame with hydraulic actuators and reinforced armor plating.",
         category = "Cybernetics",
-        vertexCount = 3120,
-        triangleCount = 1560,
+        vertexCount = 120,
+        triangleCount = 60,
         isCustomLoaded = false,
-        hasAnimations = true,
-        animationDurationSec = 5.0f
+        hasAnimations = false,
+        animationDurationSec = 0.0f
       ),
       SpatialModel(
         id = "astronaut_v1",
         title = "EVA Astronaut Helmet",
         description = "Pressurized extravehicular helmet with gold-coated solar radiation visor.",
         category = "Aerospace & Sci-Fi",
-        vertexCount = 2160,
-        triangleCount = 1080,
+        vertexCount = 385,
+        triangleCount = 660,
         isCustomLoaded = false,
-        hasAnimations = true,
-        animationDurationSec = 3.0f
+        hasAnimations = false,
+        animationDurationSec = 0.0f
       )
     )
   }
