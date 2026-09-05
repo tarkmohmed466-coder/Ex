@@ -12,6 +12,8 @@ import com.google.ar.core.ArCoreApk
 import com.google.ar.core.AugmentedImage
 import com.google.ar.core.AugmentedImageDatabase
 import com.google.ar.core.Camera
+import com.google.ar.core.CameraConfig
+import com.google.ar.core.CameraConfigFilter
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import com.google.ar.core.HitResult
@@ -87,6 +89,8 @@ data class ArCoreTrackingData(
   val cloudAnchorsCount: Int = 0,
   val recordingTelemetry: RecordingTelemetry = RecordingTelemetry(),
   val reconstructionTelemetry: ReconstructionTelemetry = ReconstructionTelemetry(),
+  val isRealtimeBackendConnected: Boolean = false,
+  val isMultiplayerActive: Boolean = false,
   val certification: DeviceCapabilityCertification? = null,
   val detectedPlanes: List<DetectedPlaneInfo> = emptyList(),
   val detectedImages: List<DetectedImageInfo> = emptyList()
@@ -296,7 +300,27 @@ class ArCoreSessionManager(private val context: Context) {
           // Certify hardware against ARCore capability matrix
           deviceCertification = ArCoreDeviceMatrix.certifyDevice(context, newSession)
 
-          // Real-time 60fps focus mode
+          // Select optimal camera config based on target FPS and sensor capabilities
+          try {
+            val cameraFilter = CameraConfigFilter(newSession)
+              .setFacingDirection(CameraConfig.FacingDirection.BACK)
+            val supportedConfigs = newSession.getSupportedCameraConfigs(cameraFilter)
+            // Prefer 60 FPS for fluid tracking if supported, falling back to 30 FPS
+            val optimalConfig = supportedConfigs.firstOrNull { cfg ->
+              cfg.fpsRange.upper >= 60
+            } ?: supportedConfigs.firstOrNull { cfg ->
+              cfg.fpsRange.upper >= 30
+            } ?: supportedConfigs.firstOrNull()
+
+            if (optimalConfig != null) {
+              newSession.cameraConfig = optimalConfig
+              Log.i(TAG, "Selected optimal CameraConfig: ${optimalConfig.imageSize.width}x${optimalConfig.imageSize.height}, fpsRange=${optimalConfig.fpsRange}")
+            }
+          } catch (e: Throwable) {
+            Log.w(TAG, "CameraConfig selection fallback: ${e.message}")
+          }
+
+          // Real-time auto focus mode
           config.focusMode = Config.FocusMode.AUTO
           config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
 
@@ -595,6 +619,8 @@ class ArCoreSessionManager(private val context: Context) {
         cloudAnchorsCount = cloudAnchorManager.cloudAnchorsCount,
         recordingTelemetry = recordingPlaybackManager.telemetry,
         reconstructionTelemetry = environmentalMeshManager.telemetry,
+        isRealtimeBackendConnected = multiplayerBackend.isBackendConnected,
+        isMultiplayerActive = multiplayerBackend.isMultiplayerActive,
         certification = deviceCertification,
         detectedPlanes = scratchPlaneList,
         detectedImages = scratchImageList

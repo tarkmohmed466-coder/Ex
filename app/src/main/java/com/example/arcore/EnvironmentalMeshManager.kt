@@ -1,10 +1,13 @@
 package com.example.arcore
 
+import android.media.Image
 import android.util.Log
 import com.google.ar.core.Plane
 import com.google.ar.core.Session
 import com.google.ar.core.StreetscapeGeometry
 import com.google.ar.core.TrackingState
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.IntBuffer
 
@@ -41,7 +44,9 @@ data class MeshChunk(
   val vertexCount: Int,
   val triangleCount: Int,
   val centerPosition: FloatArray,
-  val surfaceAreaSquareMeters: Float
+  val surfaceAreaSquareMeters: Float,
+  val vertexBuffer: FloatBuffer? = null,
+  val indexBuffer: IntBuffer? = null
 ) {
   override fun equals(other: Any?): Boolean {
     if (this === other) return true
@@ -234,17 +239,166 @@ class EnvironmentalMeshManager {
         // Streetscape not active on current device/environment
       }
 
-      // 3. Environmental 3D Mesh: Point Cloud samples are unorganized feature points,
-      // NOT real mesh triangles. We do NOT synthesize fake mesh triangles or surface area.
-      // Only report environmental mesh geometry when actual 3D mesh vertices and triangle indices exist.
-      if (frame != null) {
-        var pointCloud: com.google.ar.core.PointCloud? = null
+      // 3. Environmental 3D Mesh: Extract real physical 3D mesh geometry from ARCore 16-bit depth buffer
+      environmental3dChunks.clear()
+      if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
+        var depthImage: Image? = null
         try {
-          pointCloud = frame.acquirePointCloud()
-          // Validates point cloud availability without fabricating mesh topology
+          depthImage = try {
+            frame.acquireDepthImage16Bits()
+          } catch (_: Throwable) {
+            frame.acquireRawDepthImage16Bits()
+          }
+
+          if (depthImage != null) {
+            val width = depthImage.width
+            val height = depthImage.height
+            val planes = depthImage.planes
+            if (planes.isNotEmpty() && width > 0 && height > 0) {
+              val plane = planes[0]
+              val buffer = plane.buffer.order(ByteOrder.LITTLE_ENDIAN)
+              val pixelStride = plane.pixelStride
+              val rowStride = plane.rowStride
+
+              // Intrinsic parameters for unprojection
+              val intrinsics = frame.camera.imageIntrinsics
+              val fx = intrinsics.focalLength[0] * (width.toFloat() / intrinsics.imageDimensions[0])
+              val fy = intrinsics.focalLength[1] * (height.toFloat() / intrinsics.imageDimensions[1])
+              val cx = intrinsics.principalPoint[0] * (width.toFloat() / intrinsics.imageDimensions[0])
+              val cy = intrinsics.principalPoint[1] * (height.toFloat() / intrinsics.imageDimensions[1])
+
+              val camPose = frame.camera.pose
+              val step = 10 // grid step size for regular spatial mesh sampling
+              val gridW = (width - 1) / step + 1
+              val gridH = (height - 1) / step + 1
+
+              // World positions grid: 3 floats per sample
+              val gridPositions = FloatArray(gridW * gridH * 3)
+              val gridValid = BooleanArray(gridW * gridH)
+
+              for (gy in 0 until gridH) {
+                val y = minOf(gy * step, height - 1)
+                val rowStart = y * rowStride
+                for (gx in 0 until gridW) {
+                  val x = minOf(gx * step, width - 1)
+                  val byteIdx = rowStart + x * pixelStride
+                  val depthMm = buffer.getShort(byteIdx).toInt() and 0xFFFF
+                  val idx = gy * gridW + gx
+                  if (depthMm in 200..6000) {
+                    val zM = depthMm / 1000f
+                    val camX = (x - cx) * zM / fx
+                    val camY = -(y - cy) * zM / fy
+                    val camZ = -zM
+
+                    val worldP = camPose.transformPoint(floatArrayOf(camX, camY, camZ))
+                    gridPositions[idx * 3] = worldP[0]
+                    gridPositions[idx * 3 + 1] = worldP[1]
+                    gridPositions[idx * 3 + 2] = worldP[2]
+                    gridValid[idx] = true
+                  } else {
+                    gridValid[idx] = false
+                  }
+                }
+              }
+
+              // Collect mesh triangles grouped by surface classification
+              val semanticTris = mutableMapOf<MeshSurfaceCategory, MutableList<FloatArray>>()
+
+              for (gy in 0 until gridH - 1) {
+                for (gx in 0 until gridW - 1) {
+                  val i00 = gy * gridW + gx
+                  val i10 = gy * gridW + (gx + 1)
+                  val i01 = (gy + 1) * gridW + gx
+                  val i11 = (gy + 1) * gridW + (gx + 1)
+
+                  if (gridValid[i00] && gridValid[i10] && gridValid[i01]) {
+                    val p0 = floatArrayOf(gridPositions[i00 * 3], gridPositions[i00 * 3 + 1], gridPositions[i00 * 3 + 2])
+                    val p1 = floatArrayOf(gridPositions[i10 * 3], gridPositions[i10 * 3 + 1], gridPositions[i10 * 3 + 2])
+                    val p2 = floatArrayOf(gridPositions[i01 * 3], gridPositions[i01 * 3 + 1], gridPositions[i01 * 3 + 2])
+
+                    val d1 = Math.abs(p0[2] - p1[2]); val d2 = Math.abs(p0[2] - p2[2])
+                    if (d1 < 0.20f && d2 < 0.20f) {
+                      val cat = classifyTriangleCategory(p0, p1, p2)
+                      val list = semanticTris.getOrPut(cat) { mutableListOf() }
+                      list.add(p0); list.add(p1); list.add(p2)
+                    }
+                  }
+
+                  if (gridValid[i10] && gridValid[i11] && gridValid[i01]) {
+                    val p0 = floatArrayOf(gridPositions[i10 * 3], gridPositions[i10 * 3 + 1], gridPositions[i10 * 3 + 2])
+                    val p1 = floatArrayOf(gridPositions[i11 * 3], gridPositions[i11 * 3 + 1], gridPositions[i11 * 3 + 2])
+                    val p2 = floatArrayOf(gridPositions[i01 * 3], gridPositions[i01 * 3 + 1], gridPositions[i01 * 3 + 2])
+
+                    val d1 = Math.abs(p0[2] - p1[2]); val d2 = Math.abs(p0[2] - p2[2])
+                    if (d1 < 0.20f && d2 < 0.20f) {
+                      val cat = classifyTriangleCategory(p0, p1, p2)
+                      val list = semanticTris.getOrPut(cat) { mutableListOf() }
+                      list.add(p0); list.add(p1); list.add(p2)
+                    }
+                  }
+                }
+              }
+
+              for ((cat, vertList) in semanticTris) {
+                if (vertList.size >= 9) {
+                  val numTris = vertList.size / 3
+                  val numVerts = vertList.size
+                  val vBuffer = ByteBuffer.allocateDirect(numVerts * 3 * 4)
+                    .order(ByteOrder.nativeOrder())
+                    .asFloatBuffer()
+                  val iBuffer = ByteBuffer.allocateDirect(numTris * 3 * 4)
+                    .order(ByteOrder.nativeOrder())
+                    .asIntBuffer()
+
+                  var sumX = 0f; var sumY = 0f; var sumZ = 0f
+                  var totalTriArea = 0f
+
+                  for (i in 0 until numTris) {
+                    val p0 = vertList[i * 3]
+                    val p1 = vertList[i * 3 + 1]
+                    val p2 = vertList[i * 3 + 2]
+
+                    vBuffer.put(p0); vBuffer.put(p1); vBuffer.put(p2)
+                    iBuffer.put(i * 3); iBuffer.put(i * 3 + 1); iBuffer.put(i * 3 + 2)
+
+                    sumX += (p0[0] + p1[0] + p2[0]) / 3f
+                    sumY += (p0[1] + p1[1] + p2[1]) / 3f
+                    sumZ += (p0[2] + p1[2] + p2[2]) / 3f
+
+                    val abx = p1[0] - p0[0]; val aby = p1[1] - p0[1]; val abz = p1[2] - p0[2]
+                    val acx = p2[0] - p0[0]; val acy = p2[1] - p0[1]; val acz = p2[2] - p0[2]
+                    val crossX = aby * acz - abz * acy
+                    val crossY = abz * acx - abx * acz
+                    val crossZ = abx * acy - aby * acx
+                    totalTriArea += 0.5f * Math.sqrt((crossX * crossX + crossY * crossY + crossZ * crossZ).toDouble()).toFloat()
+                  }
+                  vBuffer.position(0)
+                  iBuffer.position(0)
+
+                  val center = floatArrayOf(sumX / numTris, sumY / numTris, sumZ / numTris)
+                  val chunk = MeshChunk(
+                    id = "env_mesh_${cat.name.lowercase()}",
+                    sourceType = GeometrySourceType.ENVIRONMENTAL_3D_MESH,
+                    category = cat,
+                    vertexCount = numVerts,
+                    triangleCount = numTris,
+                    centerPosition = center,
+                    surfaceAreaSquareMeters = totalTriArea,
+                    vertexBuffer = vBuffer,
+                    indexBuffer = iBuffer
+                  )
+                  environmental3dChunks[chunk.id] = chunk
+
+                  if (cat == MeshSurfaceCategory.FLOOR) hasFloor = true
+                  if (cat == MeshSurfaceCategory.WALL) hasWall = true
+                  if (cat == MeshSurfaceCategory.TABLE_SURFACE || cat == MeshSurfaceCategory.DESK_OR_COUNTER) hasTable = true
+                }
+              }
+            }
+          }
         } catch (_: Throwable) {
         } finally {
-          pointCloud?.close()
+          depthImage?.close()
         }
       }
 
@@ -299,6 +453,24 @@ class EnvironmentalMeshManager {
       )
     } catch (e: Exception) {
       Log.d(TAG, "Environmental mesh update: ${e.message}")
+    }
+  }
+
+  private fun classifyTriangleCategory(p0: FloatArray, p1: FloatArray, p2: FloatArray): MeshSurfaceCategory {
+    val abx = p1[0] - p0[0]; val aby = p1[1] - p0[1]; val abz = p1[2] - p0[2]
+    val acx = p2[0] - p0[0]; val acy = p2[1] - p0[1]; val acz = p2[2] - p0[2]
+    val cx = aby * acz - abz * acy
+    val cy = abz * acx - abx * acz
+    val cz = abx * acy - aby * acx
+    val len = Math.sqrt((cx * cx + cy * cy + cz * cz).toDouble()).toFloat()
+    val ny = if (len > 0.0001f) cy / len else 0f
+    val avgY = (p0[1] + p1[1] + p2[1]) / 3f
+
+    return when {
+      ny > 0.6f -> if (avgY <= FLOOR_HEIGHT_THRESHOLD_METERS) MeshSurfaceCategory.FLOOR else MeshSurfaceCategory.TABLE_SURFACE
+      ny < -0.6f -> MeshSurfaceCategory.CEILING
+      Math.abs(ny) < 0.35f -> MeshSurfaceCategory.WALL
+      else -> MeshSurfaceCategory.GENERIC_OBSTACLE
     }
   }
 

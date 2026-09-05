@@ -101,16 +101,35 @@ fun DiagnosticsHud(
         modifier = Modifier.fillMaxWidth()
       ) {
         Text(
-          text = "Depth: ${String.format("%.2f", telemetry.depthAvgMeters)}m ${if (telemetry.depthOcclusionDetected) "[OCCLUSION]" else ""}",
+          text = "Track: ${telemetry.arTrackingStatus}",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = if (telemetry.arTrackingStatus.startsWith("TRACKING")) Color(0xFF4ADE80) else Color(0xFFFBBF24)
+        )
+        Text(
+          text = "Multiplayer: ${if (telemetry.isMultiplayerActive) "Room Active" else if (telemetry.isRealtimeBackendConnected) "Online" else "Offline"}",
+          fontFamily = FontFamily.Monospace,
+          fontSize = 10.sp,
+          color = if (telemetry.isMultiplayerActive) Color(0xFF22C55E) else if (telemetry.isRealtimeBackendConnected) Color(0xFF38BDF8) else Color(0xFF94A3B8)
+        )
+      }
+
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth()
+      ) {
+        Text(
+          text = "Depth: ${String.format("%.2f", telemetry.depthAvgMeters)}m | Occ: ${(telemetry.occlusionPercentage * 100).toInt()}% [${if (telemetry.isGpuDepthOcclusionActive) "GPU" else "CPU"}]",
           fontFamily = FontFamily.Monospace,
           fontSize = 10.sp,
           color = if (telemetry.depthOcclusionDetected) Color(0xFFF43F5E) else Color(0xFF38BDF8)
         )
         Text(
-          text = "Thermal: ${telemetry.thermalStatus}",
+          text = "Cov/Conf: ${telemetry.depthCoveragePercentage.toInt()}% / ${telemetry.depthConfidencePercentage?.toInt() ?: telemetry.depthConfidenceScore.toInt()}%",
           fontFamily = FontFamily.Monospace,
           fontSize = 10.sp,
-          color = Color(0xFFCBD5E1)
+          color = Color(0xFF34D399)
         )
       }
 

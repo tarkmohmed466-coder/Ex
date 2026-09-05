@@ -36,8 +36,14 @@ data class GeospatialStatus(
   val horizontalAccuracyMeters: Double = 0.0,
   val verticalAccuracyMeters: Double = 0.0,
   val headingAccuracyDegrees: Double = 0.0,
-  val streetscapeGeometriesCount: Int = 0
-)
+  val streetscapeGeometriesCount: Int = 0,
+  val guidanceMessage: String = "Geospatial VPS Initializing"
+) {
+  val isAccuracySufficientForPlacement: Boolean
+    get() = trackingState == "TRACKING" &&
+            horizontalAccuracyMeters > 0.0 && horizontalAccuracyMeters <= 12.0 &&
+            verticalAccuracyMeters > 0.0 && verticalAccuracyMeters <= 15.0
+}
 
 class ArCoreGeospatialManager {
 
@@ -139,6 +145,12 @@ class ArCoreGeospatialManager {
           }
         }
 
+        val guidance = when {
+          cameraGeospatialPose.horizontalAccuracy in 0.01..5.0 -> "VPS high-accuracy localization ready"
+          cameraGeospatialPose.horizontalAccuracy in 5.01..15.0 -> "Refining VPS: Point camera at buildings or landmarks"
+          else -> "Localizing Earth pose: Scan physical surroundings"
+        }
+
         status = status.copy(
           isSupported = true,
           earthState = "EARTH_TRACKING",
@@ -150,12 +162,19 @@ class ArCoreGeospatialManager {
           horizontalAccuracyMeters = cameraGeospatialPose.horizontalAccuracy,
           verticalAccuracyMeters = cameraGeospatialPose.verticalAccuracy,
           headingAccuracyDegrees = cameraGeospatialPose.headingAccuracy,
-          streetscapeGeometriesCount = streetscapeCount
+          streetscapeGeometriesCount = streetscapeCount,
+          guidanceMessage = guidance
         )
       } else {
+        val guidance = when (earthTracking) {
+          TrackingState.PAUSED -> "Earth tracking paused - move device slowly across surroundings"
+          TrackingState.STOPPED -> "Earth tracking stopped"
+          else -> "Geospatial VPS initializing"
+        }
         status = status.copy(
           trackingState = trackingName,
-          earthState = if (earthTracking == TrackingState.PAUSED) "EARTH_PAUSED" else "EARTH_STOPPED"
+          earthState = if (earthTracking == TrackingState.PAUSED) "EARTH_PAUSED" else "EARTH_STOPPED",
+          guidanceMessage = guidance
         )
       }
     } catch (e: Exception) {

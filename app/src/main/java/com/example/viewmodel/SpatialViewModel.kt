@@ -396,6 +396,8 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         isArCoreInstalled = trackingData.certification?.isArCoreInstalled ?: true,
         mrPassthroughSemantics = "Monoscopic Passthrough + Stereoscopic Virtual Rendering",
         isTrueBinocularPassthrough = false,
+        isRealtimeBackendConnected = trackingData.isRealtimeBackendConnected,
+        isMultiplayerActive = trackingData.isMultiplayerActive,
         arRecordingStatus = trackingData.recordingTelemetry.recordingStatus,
         environmentalMeshTriangles = trackingData.reconstructionTelemetry.totalTriangles,
         environmentalMeshAreaSqM = trackingData.reconstructionTelemetry.totalSurfaceAreaSqMeters,
