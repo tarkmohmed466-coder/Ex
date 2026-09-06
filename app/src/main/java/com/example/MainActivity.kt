@@ -273,6 +273,7 @@ fun MixedRealityScreen(
       },
       onDualCameraCreated = { dualView ->
         dualView.arCoreSessionManager = spatialSurfaceView.arCoreSessionManager
+        dualView.depthOcclusionManager = spatialSurfaceView.depthOcclusionManager
         dualView.onCameraTextureReady = { texName ->
           spatialSurfaceView.arCoreSessionManager.setCameraTextureName(texName)
         }

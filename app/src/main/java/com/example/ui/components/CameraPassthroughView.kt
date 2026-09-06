@@ -68,6 +68,7 @@ fun CameraPassthroughView(
       val dualCameraView = remember {
         DualCameraGLSurfaceView(context).also {
           it.displayMode = displayMode
+          it.attachLifecycle(lifecycleOwner)
           onDualCameraCreated?.invoke(it)
         }
       }
@@ -77,6 +78,7 @@ fun CameraPassthroughView(
       }
 
       DisposableEffect(lifecycleOwner, dualCameraView) {
+        dualCameraView.attachLifecycle(lifecycleOwner)
         val observer = LifecycleEventObserver { _, event ->
           when (event) {
             Lifecycle.Event.ON_RESUME -> dualCameraView.onResume()

@@ -6,94 +6,88 @@ import android.os.PowerManager
 import android.util.Log
 
 enum class ThermalQualityLevel(
-  val label: String,
+  val resolutionScale: Float,
   val msaaSamples: Int,
   val enableFxaa: Boolean,
-  val resolutionScale: Float,
-  val targetFps: Int,
-  val allowHeavyFeatures: Boolean,
   val isThrottled: Boolean
 ) {
-  HIGH("High Quality (Nominal)", 2, true, 1.0f, 60, true, false),
-  MEDIUM("Medium Quality (Moderate Heat)", 1, true, 0.9f, 45, true, true),
-  LOW("Low Quality (Severe Heat)", 1, false, 0.75f, 30, false, true),
-  EMERGENCY("Emergency Cooldown", 1, false, 0.5f, 20, false, true)
+  HIGH(resolutionScale = 1.0f, msaaSamples = 2, enableFxaa = true, isThrottled = false),
+  MEDIUM(resolutionScale = 0.9f, msaaSamples = 1, enableFxaa = true, isThrottled = true),
+  LOW(resolutionScale = 0.75f, msaaSamples = 1, enableFxaa = false, isThrottled = true),
+  EMERGENCY(resolutionScale = 0.5f, msaaSamples = 1, enableFxaa = false, isThrottled = true)
 }
 
 /**
- * Monitors device thermal status and dynamically triggers staged rendering quality adaptation
- * (HIGH, MEDIUM, LOW, EMERGENCY) with hysteresis to prevent quality oscillation.
+ * Monitors device thermal status via PowerManager and dynamically adapts
+ * rendering quality and resolution to safeguard hardware from thermal throttling.
  */
 class ThermalGuardManager(
   private val context: Context,
-  private val onQualityChanged: (level: ThermalQualityLevel, statusString: String) -> Unit
+  private val onThermalStatusChanged: (ThermalQualityLevel, String) -> Unit
 ) {
-
   companion object {
-    private const val TAG = "ThermalGuardManager"
-    private const val HYSTERESIS_DOWNGRADE_MS = 2500L
-    private const val HYSTERESIS_UPGRADE_MS = 5000L
+    private const val TAG = "ThermalGuard"
   }
 
-  private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-  private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
+  private val powerManager: PowerManager? =
+    context.getSystemService(Context.POWER_SERVICE) as? PowerManager
 
-  private var currentLevel: ThermalQualityLevel = ThermalQualityLevel.HIGH
-  private var pendingLevel: ThermalQualityLevel = ThermalQualityLevel.HIGH
-  private var pendingLevelTimestamp = 0L
+  private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
+  private var isMonitoring = false
 
   fun startMonitoring() {
+    if (isMonitoring) return
+    isMonitoring = true
+
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && powerManager != null) {
-      thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
-        val rawLevel = when (status) {
-          PowerManager.THERMAL_STATUS_NONE -> ThermalQualityLevel.HIGH
-          PowerManager.THERMAL_STATUS_LIGHT -> ThermalQualityLevel.HIGH
-          PowerManager.THERMAL_STATUS_MODERATE -> ThermalQualityLevel.MEDIUM
-          PowerManager.THERMAL_STATUS_SEVERE -> ThermalQualityLevel.LOW
-          PowerManager.THERMAL_STATUS_CRITICAL,
-          PowerManager.THERMAL_STATUS_EMERGENCY,
-          PowerManager.THERMAL_STATUS_SHUTDOWN -> ThermalQualityLevel.EMERGENCY
-          else -> ThermalQualityLevel.HIGH
+      try {
+        val listener = PowerManager.OnThermalStatusChangedListener { status ->
+          val (level, statusStr) = mapThermalStatus(status)
+          onThermalStatusChanged(level, statusStr)
         }
-        evaluateThermalTransition(rawLevel, "Thermal Status: $status")
-      }
-      powerManager.addThermalStatusListener(thermalListener!!)
-    } else {
-      onQualityChanged(ThermalQualityLevel.HIGH, "Nominal (Standard)")
-    }
-  }
+        thermalListener = listener
+        powerManager.addThermalStatusListener(listener)
 
-  private fun evaluateThermalTransition(targetLevel: ThermalQualityLevel, statusMessage: String) {
-    val now = System.currentTimeMillis()
-
-    // If target level is worse (downgrade), respond faster (HYSTERESIS_DOWNGRADE_MS)
-    // If target level is better (upgrade), wait longer (HYSTERESIS_UPGRADE_MS)
-    if (targetLevel != currentLevel) {
-      if (targetLevel != pendingLevel) {
-        pendingLevel = targetLevel
-        pendingLevelTimestamp = now
-      } else {
-        val requiredTime = if (targetLevel.ordinal > currentLevel.ordinal) {
-          HYSTERESIS_DOWNGRADE_MS
-        } else {
-          HYSTERESIS_UPGRADE_MS
-        }
-
-        if (now - pendingLevelTimestamp >= requiredTime || targetLevel == ThermalQualityLevel.EMERGENCY) {
-          currentLevel = targetLevel
-          Log.i(TAG, "Thermal Guard transition to ${currentLevel.label} (msaa=${currentLevel.msaaSamples}, scale=${currentLevel.resolutionScale})")
-          onQualityChanged(currentLevel, statusMessage)
-        }
+        val currentStatus = powerManager.currentThermalStatus
+        val (level, statusStr) = mapThermalStatus(currentStatus)
+        onThermalStatusChanged(level, statusStr)
+      } catch (e: Exception) {
+        Log.w(TAG, "Unable to register thermal status listener: ${e.message}")
+        onThermalStatusChanged(ThermalQualityLevel.HIGH, "Nominal (Safe)")
       }
     } else {
-      pendingLevel = currentLevel
+      onThermalStatusChanged(ThermalQualityLevel.HIGH, "Nominal (Safe)")
     }
   }
 
   fun stopMonitoring() {
+    if (!isMonitoring) return
+    isMonitoring = false
+
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && powerManager != null && thermalListener != null) {
-      powerManager.removeThermalStatusListener(thermalListener!!)
+      try {
+        powerManager.removeThermalStatusListener(thermalListener!!)
+      } catch (e: Exception) {
+        Log.w(TAG, "Error removing thermal status listener: ${e.message}")
+      }
       thermalListener = null
+    }
+  }
+
+  private fun mapThermalStatus(status: Int): Pair<ThermalQualityLevel, String> {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      when (status) {
+        PowerManager.THERMAL_STATUS_NONE -> Pair(ThermalQualityLevel.HIGH, "Nominal (Safe)")
+        PowerManager.THERMAL_STATUS_LIGHT -> Pair(ThermalQualityLevel.MEDIUM, "Light Throttling")
+        PowerManager.THERMAL_STATUS_MODERATE -> Pair(ThermalQualityLevel.MEDIUM, "Moderate Throttling")
+        PowerManager.THERMAL_STATUS_SEVERE -> Pair(ThermalQualityLevel.LOW, "Severe Throttling")
+        PowerManager.THERMAL_STATUS_CRITICAL -> Pair(ThermalQualityLevel.EMERGENCY, "Critical Throttling")
+        PowerManager.THERMAL_STATUS_EMERGENCY -> Pair(ThermalQualityLevel.EMERGENCY, "Emergency Throttling")
+        PowerManager.THERMAL_STATUS_SHUTDOWN -> Pair(ThermalQualityLevel.EMERGENCY, "Device Shutdown Imminent")
+        else -> Pair(ThermalQualityLevel.HIGH, "Nominal (Safe)")
+      }
+    } else {
+      Pair(ThermalQualityLevel.HIGH, "Nominal (Safe)")
     }
   }
 }

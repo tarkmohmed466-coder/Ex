@@ -85,6 +85,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
       uniform int uDepthOcclusionActive;
       uniform float uMinPhysicalDepth;
       uniform float uMaxPhysicalDepth;
+      uniform float uVirtualDepth;
 
       float reconstructPhysicalDepthMeters(sampler2D depthTexture, vec2 depthUv) {
         vec4 packedDepth = texture2D(depthTexture, depthUv);
@@ -99,10 +100,15 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
       void main() {
         vec4 cameraColor = texture2D(uTexture, vTexCoord);
         if (uDepthOcclusionActive == 1) {
+          // True GPU depth occlusion: physical depth is actually sampled and compared
           float physicalDepth = reconstructPhysicalDepthMeters(uPhysicalDepthTexture, vScreenUv);
-          if (physicalDepth > 0.08 && physicalDepth < uMaxPhysicalDepth) {
-            gl_FragColor = cameraColor;
-            return;
+          if (physicalDepth > 0.08) {
+            float compareDepth = (uVirtualDepth > 0.1) ? uVirtualDepth : uMaxPhysicalDepth;
+            if (physicalDepth < compareDepth) {
+              // Real foreground physical object occludes virtual background
+              gl_FragColor = cameraColor;
+              return;
+            }
           }
         }
         gl_FragColor = cameraColor;
@@ -126,6 +132,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   private var uDepthOcclusionActiveHandle = 0
   private var uMinPhysicalDepthHandle = 0
   private var uMaxPhysicalDepthHandle = 0
+  private var uVirtualDepthHandle = 0
   private var textureId = 0
 
   var onCameraTextureReady: ((Int) -> Unit)? = null
@@ -149,7 +156,12 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   var cameraSurface: Surface? = null
     private set
 
+  var virtualDepthMeters: Float = 1.2f
+
+  var lifecycleOwner: LifecycleOwner? = null
+
   private var cameraProvider: ProcessCameraProvider? = null
+  private var isCameraXActive = false
 
   private var viewWidth = 1
   private var viewHeight = 1
@@ -246,12 +258,68 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
     }
   }
 
+  fun attachLifecycle(owner: LifecycleOwner) {
+    this.lifecycleOwner = owner
+    val sm = arCoreSessionManager
+    if (cameraSurface != null && (sm == null || sm.session == null || !sm.isArCorePackageInstalled())) {
+      startCameraX(owner)
+    }
+  }
+
+  fun startCameraX(owner: LifecycleOwner) {
+    val surf = cameraSurface ?: return
+    if (!surf.isValid) return
+
+    val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+    cameraProviderFuture.addListener({
+      try {
+        val provider = cameraProviderFuture.get()
+        cameraProvider = provider
+        provider.unbindAll()
+
+        val preview = Preview.Builder().build()
+        preview.setSurfaceProvider { request ->
+          val currentSurf = cameraSurface
+          if (currentSurf != null && currentSurf.isValid) {
+            request.provideSurface(currentSurf, ContextCompat.getMainExecutor(context)) {
+              // Surface release callback
+            }
+          } else {
+            request.willNotProvideSurface()
+          }
+        }
+
+        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+        provider.bindToLifecycle(owner, cameraSelector, preview)
+        isCameraXActive = true
+        Log.i(TAG, "CameraX successfully bound to cameraSurface.")
+      } catch (e: Exception) {
+        Log.w(TAG, "Failed binding CameraX: ${e.message}")
+      }
+    }, ContextCompat.getMainExecutor(context))
+  }
+
+  fun stopCameraX() {
+    try {
+      if (isCameraXActive || cameraProvider != null) {
+        cameraProvider?.unbindAll()
+        cameraProvider = null
+        isCameraXActive = false
+        Log.i(TAG, "CameraX unbound.")
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "Error unbinding CameraX: ${e.message}")
+    }
+  }
+
   override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
     try {
       if (textureId != 0) {
         GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)
         textureId = 0
       }
+      cameraSurface?.release()
+      cameraSurface = null
       surfaceTexture?.release()
       surfaceTexture = null
 
@@ -265,6 +333,11 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
       aTexCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
       uTexMatrixHandle = GLES20.glGetUniformLocation(program, "uTexMatrix")
       uTextureHandle = GLES20.glGetUniformLocation(program, "uTexture")
+      uPhysicalDepthTextureHandle = GLES20.glGetUniformLocation(program, "uPhysicalDepthTexture")
+      uDepthOcclusionActiveHandle = GLES20.glGetUniformLocation(program, "uDepthOcclusionActive")
+      uMinPhysicalDepthHandle = GLES20.glGetUniformLocation(program, "uMinPhysicalDepth")
+      uMaxPhysicalDepthHandle = GLES20.glGetUniformLocation(program, "uMaxPhysicalDepth")
+      uVirtualDepthHandle = GLES20.glGetUniformLocation(program, "uVirtualDepth")
 
       // 1. Generate the ONE authoritative GL External Texture
       val textures = IntArray(1)
@@ -277,7 +350,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
       GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
       GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
-      // 2. Create the ONE authoritative SurfaceTexture
+      // 2. Create the ONE authoritative SurfaceTexture synchronized with GL texture
       val st = try {
         SurfaceTexture(textureId)
       } catch (e: Exception) {
@@ -286,12 +359,35 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
           attachToGLContext(textureId)
         }
       }
+      st.setDefaultBufferSize(viewWidth, viewHeight)
       st.setOnFrameAvailableListener(this)
       surfaceTexture = st
 
-      // 3. Rebind camera to the new surface/texture immediately
+      // 3. Create the ONE authoritative Camera Surface from SurfaceTexture
+      val surf = Surface(st)
+      cameraSurface = surf
+      onCameraSurfaceReady?.invoke(surf)
+
+      // 4. Rebind ARCore to the new GL texture on this GL thread
       onCameraTextureReady?.invoke(textureId)
-      arCoreSessionManager?.setCameraTextureName(textureId)
+      val sm = arCoreSessionManager
+      if (sm != null) {
+        sm.setCameraTextureName(textureId)
+        (context as? Activity)?.let { act ->
+          if (sm.isSessionPaused) {
+            sm.recoverCameraStream(act)
+          }
+        }
+      }
+
+      // 5. If ARCore is not actively tracking/available, bind CameraX to cameraSurface
+      if (sm == null || sm.session == null || !sm.isArCorePackageInstalled()) {
+        lifecycleOwner?.let { owner ->
+          post {
+            startCameraX(owner)
+          }
+        }
+      }
 
       Log.i(TAG, "Authoritative camera GL surface created with textureId=$textureId")
       requestRender()
@@ -303,6 +399,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
     viewWidth = maxOf(width, 1)
     viewHeight = maxOf(height, 1)
+    surfaceTexture?.setDefaultBufferSize(viewWidth, viewHeight)
     val rotation = (context as? Activity)?.windowManager?.defaultDisplay?.rotation ?: 0
     arCoreSessionManager?.setDisplayGeometry(rotation, viewWidth, viewHeight)
   }
@@ -323,11 +420,21 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
 
       if (displayMode == DisplayMode.OBJECT) return
 
-      // Authoritative Pipeline: Update ARCore frame on the GL thread where textureId lives!
+      // Authoritative Pipeline: Synchronize ARCore textureId on the GL thread
       val sm = arCoreSessionManager
+      if (sm != null && sm.session != null && textureId != 0) {
+        if (sm.currentCameraTextureId != textureId) {
+          sm.setCameraTextureName(textureId)
+        }
+      }
+
       val frame = sm?.updateFrame()
 
       if (frame != null) {
+        // ARCore is actively producing frames
+        if (isCameraXActive) {
+          post { stopCameraX() }
+        }
         totalCameraFramesReceived++
         lastCameraFrameTimeMs = System.currentTimeMillis()
         frame.transformCoordinates2d(
@@ -351,6 +458,16 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
           }
           hasNewFrame = false
         }
+        texBuffer.position(0)
+        texBuffer.put(DEFAULT_TEX_COORDS)
+        texBuffer.position(0)
+
+        // If ARCore is not installed or available and CameraX is not yet running, launch CameraX
+        if (!isCameraXActive && (sm == null || !sm.isArCorePackageInstalled() || sm.session == null)) {
+          lifecycleOwner?.let { owner ->
+            post { startCameraX(owner) }
+          }
+        }
       }
 
       if (program == 0 || textureId == 0) return
@@ -360,6 +477,21 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
       GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
       GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
       GLES20.glUniform1i(uTextureHandle, 0)
+
+      // True GPU Depth Occlusion: Bind and sample physical depth texture
+      val dom = depthOcclusionManager
+      val isDepthActive = dom != null && dom.depthTextureId != 0 && dom.isDepthTextureReady
+      if (isDepthActive && dom != null) {
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dom.depthTextureId)
+        GLES20.glUniform1i(uPhysicalDepthTextureHandle, 1)
+        GLES20.glUniform1i(uDepthOcclusionActiveHandle, 1)
+        GLES20.glUniform1f(uMinPhysicalDepthHandle, dom.minDepthMeters)
+        GLES20.glUniform1f(uMaxPhysicalDepthHandle, dom.maxDepthMeters)
+        GLES20.glUniform1f(uVirtualDepthHandle, virtualDepthMeters)
+      } else {
+        GLES20.glUniform1i(uDepthOcclusionActiveHandle, 0)
+      }
 
       GLES20.glEnableVertexAttribArray(aPositionHandle)
       GLES20.glVertexAttribPointer(aPositionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
@@ -442,9 +574,12 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   }
 
   fun release() {
+    stopCameraX()
     try {
       queueEvent {
         try {
+          cameraSurface?.release()
+          cameraSurface = null
           surfaceTexture?.release()
           surfaceTexture = null
           if (textureId != 0) {

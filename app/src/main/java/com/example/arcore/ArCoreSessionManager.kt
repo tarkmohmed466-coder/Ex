@@ -366,7 +366,11 @@ class ArCoreSessionManager(private val context: Context) {
     return try {
       session?.resume()
       if (cameraTextureId != 0) {
-        session?.setCameraTextureName(cameraTextureId)
+        try {
+          session?.setCameraTextureName(cameraTextureId)
+        } catch (e: Exception) {
+          Log.w(TAG, "setCameraTextureName on resume deferred to GL thread: ${e.message}")
+        }
       }
       isSessionPaused = false
       Log.i(TAG, "ARCore session resumed successfully.")
@@ -408,13 +412,20 @@ class ArCoreSessionManager(private val context: Context) {
     }
   }
 
+  val currentCameraTextureId: Int
+    get() = cameraTextureId
+
   fun setDisplayGeometry(rotation: Int, width: Int, height: Int) {
     session?.setDisplayGeometry(rotation, width, height)
   }
 
   fun setCameraTextureName(textureId: Int) {
     cameraTextureId = textureId
-    session?.setCameraTextureName(textureId)
+    try {
+      session?.setCameraTextureName(textureId)
+    } catch (e: Exception) {
+      Log.w(TAG, "setCameraTextureName error: ${e.message}")
+    }
   }
 
   /**
