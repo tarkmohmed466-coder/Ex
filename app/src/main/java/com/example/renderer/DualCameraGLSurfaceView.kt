@@ -85,11 +85,24 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   private var textureId = 0
 
   var onCameraTextureReady: ((Int) -> Unit)? = null
+  var onCameraRecoveryNeeded: (() -> Unit)? = null
 
   private var surfaceTexture: SurfaceTexture? = null
   private var cameraSurface: Surface? = null
   private var pendingRequest: SurfaceRequest? = null
   private var executor: Executor? = null
+
+  private var lastRecoveryAttemptMs = 0L
+
+  fun triggerCameraRecovery() {
+    val now = System.currentTimeMillis()
+    if (now - lastRecoveryAttemptMs < 1000L) return
+    lastRecoveryAttemptMs = now
+    Log.i(TAG, "Triggering active camera recovery/rebind")
+    post {
+      onCameraRecoveryNeeded?.invoke()
+    }
+  }
 
   private var viewWidth = 1
   private var viewHeight = 1

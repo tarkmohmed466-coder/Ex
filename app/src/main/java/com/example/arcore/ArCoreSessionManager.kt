@@ -442,6 +442,30 @@ class ArCoreSessionManager(private val context: Context) {
   }
 
   /**
+   * Automatically restores ARCore camera stream and re-binds texture ID if session was interrupted.
+   */
+  fun recoverCameraStream(activity: Activity?): Boolean {
+    if (activity == null) return false
+    return try {
+      if (isSessionPaused || session == null) {
+        val resumed = resumeSession(activity)
+        if (resumed && cameraTextureId != 0) {
+          session?.setCameraTextureName(cameraTextureId)
+        }
+        resumed
+      } else {
+        if (cameraTextureId != 0) {
+          session?.setCameraTextureName(cameraTextureId)
+        }
+        true
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "recoverCameraStream failed: ${e.message}")
+      false
+    }
+  }
+
+  /**
    * Updates the ARCore session and processes tracking data, planes, augmented images,
    * walking distance, and light estimation. Zero-allocation per-frame execution.
    */

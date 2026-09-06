@@ -126,6 +126,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
   // Gesture state: seamless finger interaction for Rotate, Move, and Scale
   private var isOneFingerRotateMode: Boolean = false
   private var lastTapTime: Long = 0L
+  private var consecutiveNullFrames: Int = 0
 
   private var sensorPitch = 0f
   private var sensorRoll = 0f
@@ -358,8 +359,14 @@ class SpatialSurfaceView @JvmOverloads constructor(
         DisplayMode.AR -> {
           val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
           if (frame != null) {
+            consecutiveNullFrames = 0
             dualCameraGLSurfaceView?.updateFromArCoreFrame(frame)
           } else {
+            consecutiveNullFrames++
+            if (consecutiveNullFrames % 30 == 0) {
+              arCoreSessionManager.recoverCameraStream(context as? Activity)
+              dualCameraGLSurfaceView?.triggerCameraRecovery()
+            }
             dualCameraGLSurfaceView?.requestRender()
           }
           if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
@@ -457,8 +464,14 @@ class SpatialSurfaceView @JvmOverloads constructor(
 
           // Camera passthrough must ALWAYS be rendered even if tracking is PAUSED or STOPPED
           if (frame != null) {
+            consecutiveNullFrames = 0
             dualCameraGLSurfaceView?.updateFromArCoreFrame(frame)
           } else {
+            consecutiveNullFrames++
+            if (consecutiveNullFrames % 30 == 0) {
+              arCoreSessionManager.recoverCameraStream(context as? Activity)
+              dualCameraGLSurfaceView?.triggerCameraRecovery()
+            }
             dualCameraGLSurfaceView?.requestRender()
           }
 

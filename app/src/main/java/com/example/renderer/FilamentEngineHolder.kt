@@ -603,7 +603,7 @@ class FilamentEngineHolder(private val context: Context) {
 
         // Center model vertically at origin with slight downward bias toward bottom controls
         baseCenterOffsetX = -center[0]
-        baseCenterOffsetY = -center[1] - 0.06f
+        baseCenterOffsetY = -center[1] - 0.12f
         baseCenterOffsetZ = -center[2]
 
         val tm = eng.transformManager

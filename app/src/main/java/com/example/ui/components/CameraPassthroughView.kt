@@ -120,8 +120,8 @@ fun CameraPassthroughView(
         val executor = ContextCompat.getMainExecutor(context)
         var isDisposed = false
 
-        cameraProviderFuture.addListener({
-          if (isDisposed) return@addListener
+        fun bindCamera() {
+          if (isDisposed) return
           try {
             val cameraProvider = cameraProviderFuture.get()
             cameraProvider.unbindAll()
@@ -144,11 +144,21 @@ fun CameraPassthroughView(
                 cameraSelector,
                 preview
               )
-              Log.i("CameraPassthroughView", "CameraX bound with DualCameraGLSurfaceView for $displayMode")
+              Log.i("CameraPassthroughView", "CameraX bound successfully for $displayMode")
             }
           } catch (e: Exception) {
             Log.e("CameraPassthroughView", "Camera binding error: ${e.message}", e)
           }
+        }
+
+        dualCameraView.onCameraRecoveryNeeded = {
+          if (cameraProviderFuture.isDone) {
+            bindCamera()
+          }
+        }
+
+        cameraProviderFuture.addListener({
+          bindCamera()
         }, executor)
 
         onDispose {
