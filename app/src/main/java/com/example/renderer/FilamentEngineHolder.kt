@@ -601,8 +601,9 @@ class FilamentEngineHolder(private val context: Context) {
         modelPhysicalHeightMeters = halfExtents[1] * 2.0f
         modelPhysicalDepthMeters = halfExtents[2] * 2.0f
 
+        // Center model vertically at origin with slight downward bias toward bottom controls
         baseCenterOffsetX = -center[0]
-        baseCenterOffsetY = -center[1] + halfExtents[1]
+        baseCenterOffsetY = -center[1] - 0.06f
         baseCenterOffsetZ = -center[2]
 
         val tm = eng.transformManager

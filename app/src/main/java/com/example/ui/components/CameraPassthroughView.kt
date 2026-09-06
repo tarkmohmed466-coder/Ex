@@ -114,8 +114,8 @@ fun CameraPassthroughView(
         }
       }
 
-      // Bind CameraX ONLY as fallback when ARCore is not actively running camera
-      DisposableEffect(lifecycleOwner, displayMode, isArCoreActive, dualCameraView) {
+      // Bind CameraX to provide reliable live camera stream in AR and MR modes
+      DisposableEffect(lifecycleOwner, displayMode, dualCameraView) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val executor = ContextCompat.getMainExecutor(context)
         var isDisposed = false
@@ -127,28 +127,24 @@ fun CameraPassthroughView(
             cameraProvider.unbindAll()
 
             dualCameraView.displayMode = displayMode
-            if (!isArCoreActive) {
-              // CameraX Fallback when ARCore is unavailable
-              val preview = Preview.Builder()
-                .setTargetResolution(Size(1280, 720))
-                .build()
-                .also {
-                  it.setSurfaceProvider(executor) { request ->
-                    dualCameraView.provideSurface(request, executor)
-                  }
-                }
 
-              val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-              if (cameraProvider.hasCamera(cameraSelector)) {
-                cameraProvider.bindToLifecycle(
-                  lifecycleOwner,
-                  cameraSelector,
-                  preview
-                )
-                Log.i("CameraPassthroughView", "CameraX bound with DualCameraGLSurfaceView as fallback")
+            val preview = Preview.Builder()
+              .setTargetResolution(Size(1280, 720))
+              .build()
+              .also {
+                it.setSurfaceProvider(executor) { request ->
+                  dualCameraView.provideSurface(request, executor)
+                }
               }
-            } else {
-              Log.i("CameraPassthroughView", "ARCore active: CameraX bypassed for zero temporal jitter synchronization")
+
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            if (cameraProvider.hasCamera(cameraSelector)) {
+              cameraProvider.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview
+              )
+              Log.i("CameraPassthroughView", "CameraX bound with DualCameraGLSurfaceView for $displayMode")
             }
           } catch (e: Exception) {
             Log.e("CameraPassthroughView", "Camera binding error: ${e.message}", e)

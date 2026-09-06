@@ -631,8 +631,14 @@ class SpatialSurfaceView @JvmOverloads constructor(
   private fun handleTap(xPx: Float, yPx: Float) {
     if (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) {
       try {
+        val mappedX = if (displayMode == DisplayMode.MR && width > 0) {
+          val halfWidth = width / 2f
+          if (xPx > halfWidth) (xPx - halfWidth) * 2f else xPx * 2f
+        } else {
+          xPx
+        }
         val frame = arCoreSessionManager.latestFrame ?: return
-        val hit = arCoreSessionManager.hitTest(frame, xPx, yPx)
+        val hit = arCoreSessionManager.hitTest(frame, mappedX, yPx)
         if (hit != null) {
           val hitPose = hit.hitPose
           val hx = hitPose.tx()
