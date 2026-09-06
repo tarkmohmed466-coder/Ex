@@ -65,6 +65,13 @@ class SpatialSurfaceView @JvmOverloads constructor(
       value?.arCoreSessionManager = arCoreSessionManager
       value?.depthOcclusionManager = depthOcclusionManager
       value?.displayMode = displayMode
+      if (value != null && (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR)) {
+        val tex = value.textureId
+        if (tex != 0) {
+          arCoreSessionManager.setCameraTextureName(tex)
+          (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }
+        }
+      }
     }
 
   private var isSurfaceReady = false
@@ -323,7 +330,12 @@ class SpatialSurfaceView @JvmOverloads constructor(
         dualCameraGLSurfaceView?.arCoreSessionManager = arCoreSessionManager
         dualCameraGLSurfaceView?.depthOcclusionManager = depthOcclusionManager
         dualCameraGLSurfaceView?.displayMode = displayMode
-        (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }
+        val currentTex = dualCameraGLSurfaceView?.textureId ?: 0
+        if (currentTex != 0) {
+          arCoreSessionManager.setCameraTextureName(currentTex)
+          (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }
+        }
+        startRendering()
       }
     }
   }

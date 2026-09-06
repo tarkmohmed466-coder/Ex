@@ -133,7 +133,8 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   private var uMinPhysicalDepthHandle = 0
   private var uMaxPhysicalDepthHandle = 0
   private var uVirtualDepthHandle = 0
-  private var textureId = 0
+  var textureId = 0
+    private set
 
   var onCameraTextureReady: ((Int) -> Unit)? = null
   var onCameraSurfaceReady: ((Surface) -> Unit)? = null
@@ -201,7 +202,7 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
 
   init {
     setEGLContextClientVersion(2)
-    setEGLConfigChooser(8, 8, 8, 8, 0, 0)
+    setEGLConfigChooser(8, 8, 8, 8, 16, 0)
     preserveEGLContextOnPause = true
     setRenderer(this)
     renderMode = RENDERMODE_WHEN_DIRTY
