@@ -106,11 +106,23 @@ fun DiagnosticsHud(
           fontSize = 10.sp,
           color = if (telemetry.arTrackingStatus.startsWith("TRACKING")) Color(0xFF4ADE80) else Color(0xFFFBBF24)
         )
+        val mpStatus = when {
+          telemetry.isOnlineMultiplayerActive -> "ONLINE_MULTIPLAYER"
+          telemetry.isLoopbackTestActive -> "LOOPBACK_TEST"
+          telemetry.isRealtimeBackendConnected -> "RELAY_CONNECTED"
+          else -> "OFFLINE"
+        }
+        val mpColor = when {
+          telemetry.isOnlineMultiplayerActive -> Color(0xFF22C55E)
+          telemetry.isLoopbackTestActive -> Color(0xFFF59E0B)
+          telemetry.isRealtimeBackendConnected -> Color(0xFF38BDF8)
+          else -> Color(0xFF94A3B8)
+        }
         Text(
-          text = "Multiplayer: ${if (telemetry.isMultiplayerActive) "Room Active" else if (telemetry.isRealtimeBackendConnected) "Online" else "Offline"}",
+          text = "Multiplayer: $mpStatus",
           fontFamily = FontFamily.Monospace,
           fontSize = 10.sp,
-          color = if (telemetry.isMultiplayerActive) Color(0xFF22C55E) else if (telemetry.isRealtimeBackendConnected) Color(0xFF38BDF8) else Color(0xFF94A3B8)
+          color = mpColor
         )
       }
 
@@ -183,7 +195,7 @@ fun DiagnosticsHud(
           color = if (telemetry.arRecordingStatus == "RECORDING") Color(0xFFEF4444) else Color(0xFF94A3B8)
         )
         Text(
-          text = "Mesh: ${telemetry.environmentalMeshTriangles} tris (${"%.1f".format(telemetry.environmentalMeshAreaSqM)}m²)",
+          text = "Mesh: ${telemetry.environmentalMeshTriangles} tris (${"%.1f".format(telemetry.environmentalMeshAreaSqM)}m²) [${telemetry.reconstructionStage}]",
           fontFamily = FontFamily.Monospace,
           fontSize = 10.sp,
           color = Color(0xFFA78BFA)

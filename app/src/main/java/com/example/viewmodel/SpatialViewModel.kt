@@ -398,6 +398,9 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         isTrueBinocularPassthrough = false,
         isRealtimeBackendConnected = trackingData.isRealtimeBackendConnected,
         isMultiplayerActive = trackingData.isMultiplayerActive,
+        isOnlineMultiplayerActive = trackingData.isOnlineMultiplayerActive,
+        isLoopbackTestActive = trackingData.isLoopbackTestActive,
+        multiplayerMode = trackingData.multiplayerMode,
         arRecordingStatus = trackingData.recordingTelemetry.recordingStatus,
         environmentalMeshTriangles = trackingData.reconstructionTelemetry.totalTriangles,
         environmentalMeshAreaSqM = trackingData.reconstructionTelemetry.totalSurfaceAreaSqMeters,
@@ -406,6 +409,7 @@ class SpatialViewModel(application: Application) : AndroidViewModel(application)
         denseMeshChunksCount = trackingData.reconstructionTelemetry.denseMeshChunksCount,
         isDenseLocalMeshActive = trackingData.reconstructionTelemetry.isDenseLocalMeshActive,
         isFull3dSceneReconstruction = trackingData.reconstructionTelemetry.isFull3dSceneReconstruction,
+        reconstructionStage = trackingData.reconstructionTelemetry.reconstructionStage,
         metricDimensions = modelDimensions
       )
     }

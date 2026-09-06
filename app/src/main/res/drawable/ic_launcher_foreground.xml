@@ -3,7 +3,7 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/mr_headset_icon_1788534343373"
+        android:drawable="@drawable/mr_launcher_icon_1788683965141"
         android:gravity="center" />
 </layer-list>
 

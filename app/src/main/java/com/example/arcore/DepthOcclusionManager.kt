@@ -29,6 +29,28 @@ class DepthOcclusionManager {
     private const val MAX_DEPTH_HEIGHT = 480
     // Occlusion margin in meters to avoid z-fighting on object boundaries
     private const val OCCLUSION_TOLERANCE_METERS = 0.04f
+
+    /**
+     * Canonical GPU GLSL shader depth reconstruction function for GL_LUMINANCE_ALPHA depth textures.
+     * Reconstructs physical 16-bit depth in meters matching CPU depth unpacking.
+     */
+    const val GLSL_DEPTH_RECONSTRUCTION_SNIPPET = """
+      float reconstructPhysicalDepthMeters(sampler2D depthTexture, vec2 depthUv) {
+        vec4 packedDepth = texture2D(depthTexture, depthUv);
+        // Luminance (R) = low byte (depthMm & 0xFF)
+        // Alpha (A) = high byte ((depthMm >> 8) & 0xFF)
+        float depthMm = (packedDepth.r * 255.0) + (packedDepth.a * 255.0 * 256.0);
+        if (depthMm < 80.0 || depthMm > 15000.0) {
+          return 0.0; // Invalid / unmeasured
+        }
+        return depthMm / 1000.0;
+      }
+      
+      bool isVirtualFragmentOccluded(float virtualViewDepthMeters, float physicalDepthMeters, float toleranceMeters) {
+        if (physicalDepthMeters <= 0.08) return false;
+        return physicalDepthMeters < (virtualViewDepthMeters - toleranceMeters);
+      }
+    """
   }
 
   // GPU Texture state
@@ -130,6 +152,14 @@ class DepthOcclusionManager {
       frameSyncDeltaNs = Math.abs(cameraTimestampNs - depthTimestampNs)
       // Frame is considered synchronized if within ~2 frames at 30fps (66ms)
       isSynchronizedWithCamera = frameSyncDeltaNs <= 66_000_000L
+
+      if (!isSynchronizedWithCamera) {
+        // Desynchronized depth frame: camera has moved and optical axes will not align.
+        // Skip occlusion evaluation to prevent projection misalignment artifacts.
+        isOcclusionDetected = false
+        occlusionPercentage = 0f
+        return
+      }
 
       val plane = planes[0]
       val buffer: ByteBuffer = plane.buffer.order(ByteOrder.LITTLE_ENDIAN)
@@ -259,19 +289,16 @@ class DepthOcclusionManager {
       android.opengl.Matrix.multiplyMM(viewProjMatrix, 0, projMatrix, 0, viewMatrix, 0)
 
       for (anchorPose in virtualAnchorPoses) {
-        // Transform anchor into camera space to measure real optical depth from camera
+        // Transform anchor into camera space to measure real optical depth along camera optical axis (-Z)
+        // Camera-relative view-space Z: identical coordinate frame to ARCore depth image
         val poseInCameraSpace = camPose.inverse().compose(anchorPose)
-        val cameraSpaceZ = -poseInCameraSpace.tz() // Camera optical axis forward is -Z
-        val dx = anchorPose.tx() - camTx
-        val dy = anchorPose.ty() - camTy
-        val dz = anchorPose.tz() - camTz
-        val euclideanCameraDist = Math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
+        val cameraSpaceZ = -poseInCameraSpace.tz() // Optical forward axis is -Z in camera view space
 
-        // If behind camera, skip occlusion check
-        if (cameraSpaceZ <= 0.02f && euclideanCameraDist <= 0.02f) continue
+        // If behind camera near plane or at eye level, skip occlusion check
+        if (cameraSpaceZ <= 0.05f) continue
 
-        // Camera-relative virtual depth: primary view-space optical depth, fallback Euclidean distance
-        val virtualDepthMeters = if (cameraSpaceZ > 0.05f) cameraSpaceZ else euclideanCameraDist
+        // Strictly camera-relative view-space optical depth (matches physical depth buffer measurements)
+        val virtualDepthMeters = cameraSpaceZ
 
         // Project 3D anchor position into screen-space normalized coordinates [0..1]
         val clip = FloatArray(4)

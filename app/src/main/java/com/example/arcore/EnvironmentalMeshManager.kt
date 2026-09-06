@@ -275,8 +275,8 @@ class EnvironmentalMeshManager {
               val cy = intrinsics.principalPoint[1] * (height.toFloat() / intrinsics.imageDimensions[1])
 
               val camPose = frame.camera.pose
-              // Higher-density adaptive sampling: step = 3 to 4 on standard depth images
-              val step = maxOf(3, minOf(width, height) / 40)
+              // Higher-density adaptive sampling: step = 2 to 3 on standard depth images for dense mesh reconstruction
+              val step = maxOf(2, minOf(width, height) / 50)
               val gridW = (width - 1) / step + 1
               val gridH = (height - 1) / step + 1
 
@@ -298,14 +298,28 @@ class EnvironmentalMeshManager {
                   gridNormX[idx] = x.toFloat() / width
                   gridNormY[idx] = y.toFloat() / height
 
-                  // Hole-filling: if depth is zero or out-of-range, interpolate from valid neighbors
-                  if (depthMm !in 150..6000 && gx > 0 && gx < gridW - 1) {
-                    val prevIdx = rowStart + (x - step) * pixelStride
-                    val nextIdx = rowStart + minOf(x + step, width - 1) * pixelStride
-                    val dPrev = buffer.getShort(prevIdx).toInt() and 0xFFFF
-                    val dNext = buffer.getShort(nextIdx).toInt() and 0xFFFF
-                    if (dPrev in 150..6000 && dNext in 150..6000 && Math.abs(dPrev - dNext) < 150) {
-                      depthMm = (dPrev + dNext) / 2
+                  // Robust 2D Bilateral Hole-filling: if depth is zero or invalid, interpolate from valid neighbors
+                  if (depthMm !in 150..6000) {
+                    var neighborSum = 0
+                    var neighborCount = 0
+                    if (gx > 0) {
+                      val d = buffer.getShort(rowStart + (x - step) * pixelStride).toInt() and 0xFFFF
+                      if (d in 150..6000) { neighborSum += d; neighborCount++ }
+                    }
+                    if (gx < gridW - 1) {
+                      val d = buffer.getShort(rowStart + minOf(x + step, width - 1) * pixelStride).toInt() and 0xFFFF
+                      if (d in 150..6000) { neighborSum += d; neighborCount++ }
+                    }
+                    if (gy > 0) {
+                      val d = buffer.getShort((y - step) * rowStride + x * pixelStride).toInt() and 0xFFFF
+                      if (d in 150..6000) { neighborSum += d; neighborCount++ }
+                    }
+                    if (gy < gridH - 1) {
+                      val d = buffer.getShort(minOf(y + step, height - 1) * rowStride + x * pixelStride).toInt() and 0xFFFF
+                      if (d in 150..6000) { neighborSum += d; neighborCount++ }
+                    }
+                    if (neighborCount >= 2) {
+                      depthMm = neighborSum / neighborCount
                     }
                   }
 
@@ -499,9 +513,8 @@ class EnvironmentalMeshManager {
       val reconstructionStage = when {
         totalChunks == 0 -> "IDLE"
         !isLocalMeshActive -> "PLANE_DETECTION_ONLY"
-        !isDenseLocalReconstruction -> "ACCUMULATING_SPATIAL_VOXELS"
-        !isFull3dScene -> "DENSE_LOCAL_RECONSTRUCTION"
-        else -> "FULL_SCENE_RECONSTRUCTION_ACTIVE"
+        !isFull3dScene -> "PARTIAL_3D_SCENE_RECONSTRUCTION"
+        else -> "FULL_3D_SCENE_RECONSTRUCTION"
       }
 
       val semanticsSource = if (usedMlSemantics) "ARCORE_ML_SEMANTICS" else "GEOMETRIC_ORIENTATION_ESTIMATE"
@@ -537,6 +550,7 @@ class EnvironmentalMeshManager {
   /**
    * Resolves surface category: prioritizes true ARCore ML semantic labels if available;
    * otherwise falls back to explicit geometric normal orientation.
+   * Avoids false "DESK_OR_COUNTER" classification for arbitrary objects, chairs, or couches.
    */
   private fun resolveSurfaceCategory(
     frame: com.google.ar.core.Frame,
@@ -556,8 +570,13 @@ class EnvironmentalMeshManager {
         "FLOOR", "ROAD", "SIDEWALK", "TERRAIN" -> return MeshSurfaceCategory.FLOOR
         "WALL", "BUILDING", "STRUCTURE" -> return MeshSurfaceCategory.WALL
         "CEILING", "SKY" -> return MeshSurfaceCategory.CEILING
-        "TABLE", "DESK" -> return MeshSurfaceCategory.TABLE_SURFACE
-        "OBJECT", "CHAIR", "COUCH", "BED" -> return MeshSurfaceCategory.DESK_OR_COUNTER
+        "TABLE" -> return MeshSurfaceCategory.TABLE_SURFACE
+        "DESK", "COUNTER" -> return MeshSurfaceCategory.DESK_OR_COUNTER
+        "CHAIR", "COUCH", "BED" -> return MeshSurfaceCategory.GENERIC_OBSTACLE
+        "OBJECT" -> {
+          // Do NOT classify generic OBJECT as DESK_OR_COUNTER; verify geometric orientation
+          return classifyTriangleCategory(p0, p1, p2)
+        }
       }
     }
 
@@ -576,9 +595,16 @@ class EnvironmentalMeshManager {
     val avgY = (p0[1] + p1[1] + p2[1]) / 3f
 
     return when {
-      ny > 0.6f -> if (avgY <= FLOOR_HEIGHT_THRESHOLD_METERS) MeshSurfaceCategory.FLOOR else MeshSurfaceCategory.TABLE_SURFACE
-      ny < -0.6f -> MeshSurfaceCategory.CEILING
-      Math.abs(ny) < 0.35f -> MeshSurfaceCategory.WALL
+      ny > 0.7f -> {
+        // Upward horizontal plane
+        when {
+          avgY <= FLOOR_HEIGHT_THRESHOLD_METERS -> MeshSurfaceCategory.FLOOR
+          avgY in (FLOOR_HEIGHT_THRESHOLD_METERS + 0.35f)..-0.15f -> MeshSurfaceCategory.TABLE_SURFACE
+          else -> MeshSurfaceCategory.GENERIC_OBSTACLE
+        }
+      }
+      ny < -0.7f -> MeshSurfaceCategory.CEILING
+      Math.abs(ny) < 0.3f -> MeshSurfaceCategory.WALL
       else -> MeshSurfaceCategory.GENERIC_OBSTACLE
     }
   }
