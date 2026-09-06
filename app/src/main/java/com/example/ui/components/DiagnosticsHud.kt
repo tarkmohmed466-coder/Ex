@@ -131,8 +131,13 @@ fun DiagnosticsHud(
         horizontalArrangement = Arrangement.SpaceBetween,
         modifier = Modifier.fillMaxWidth()
       ) {
+        val occMode = when {
+          telemetry.isGpuDepthOcclusionActive -> "GPU Shader"
+          telemetry.isDepthTextureBoundToPipeline -> "GPU Tex Bound"
+          else -> "CPU Per-Pixel"
+        }
         Text(
-          text = "Depth: ${String.format("%.2f", telemetry.depthAvgMeters)}m | Occ: ${(telemetry.occlusionPercentage * 100).toInt()}% [${if (telemetry.isGpuDepthOcclusionActive) "GPU" else "CPU"}]",
+          text = "Depth: ${String.format("%.2f", telemetry.depthAvgMeters)}m | Occ: ${telemetry.occlusionPercentage.toInt()}% [$occMode]",
           fontFamily = FontFamily.Monospace,
           fontSize = 10.sp,
           color = if (telemetry.depthOcclusionDetected) Color(0xFFF43F5E) else Color(0xFF38BDF8)

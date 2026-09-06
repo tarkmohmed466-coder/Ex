@@ -95,6 +95,10 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   private var viewHeight = 1
   private val texMatrix = FloatArray(16)
   private var hasNewFrame = false
+  var totalCameraFramesReceived: Long = 0L
+    private set
+  var lastCameraFrameTimeMs: Long = 0L
+    private set
 
   var displayMode: DisplayMode = DisplayMode.OBJECT
     set(value) {
@@ -159,6 +163,8 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
    */
   fun updateFromArCoreFrame(frame: com.google.ar.core.Frame) {
     try {
+      totalCameraFramesReceived++
+      lastCameraFrameTimeMs = System.currentTimeMillis()
       frame.transformCoordinates2d(
         com.google.ar.core.Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
         scratchQuadCoords,

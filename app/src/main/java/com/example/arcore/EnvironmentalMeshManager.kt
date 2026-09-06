@@ -433,21 +433,67 @@ class EnvironmentalMeshManager {
 
                   val center = floatArrayOf(sumX / numTris, sumY / numTris, sumZ / numTris)
                   // Spatial voxel hash key for persistent multi-view world accumulation
-                  val voxelX = (center[0] / 0.75f).toInt()
-                  val voxelY = (center[1] / 0.75f).toInt()
-                  val voxelZ = (center[2] / 0.75f).toInt()
+                  val voxelX = (center[0] / 0.50f).toInt()
+                  val voxelY = (center[1] / 0.50f).toInt()
+                  val voxelZ = (center[2] / 0.50f).toInt()
                   val chunkId = "voxel_${voxelX}_${voxelY}_${voxelZ}_${cat.name.lowercase()}"
+
+                  // Temporal fusion: apply exponential moving average with existing voxel geometry to smooth sensor noise
+                  val existingVoxel = persistentSpatialVoxelChunks[chunkId]
+                  val finalVBuffer: FloatBuffer
+                  val finalIBuffer: IntBuffer
+                  val finalVertCount: Int
+                  val finalTriCount: Int
+                  val finalArea: Float
+
+                  if (existingVoxel != null && existingVoxel.vertexBuffer != null && existingVoxel.indexBuffer != null) {
+                    val exV = existingVoxel.vertexBuffer
+                    val exI = existingVoxel.indexBuffer
+                    exV.position(0)
+                    exI.position(0)
+
+                    val maxAllowedVerts = minOf(numVerts, existingVoxel.vertexCount)
+                    val fusedV = ByteBuffer.allocateDirect(numVerts * 3 * 4)
+                      .order(ByteOrder.nativeOrder())
+                      .asFloatBuffer()
+
+                    for (vi in 0 until maxAllowedVerts) {
+                      val ox = exV.get(vi * 3); val oy = exV.get(vi * 3 + 1); val oz = exV.get(vi * 3 + 2)
+                      val nx = vBuffer.get(vi * 3); val ny = vBuffer.get(vi * 3 + 1); val nz = vBuffer.get(vi * 3 + 2)
+                      // Temporal smoothing 70% previous, 30% new
+                      fusedV.put(ox * 0.70f + nx * 0.30f)
+                      fusedV.put(oy * 0.70f + ny * 0.30f)
+                      fusedV.put(oz * 0.70f + nz * 0.30f)
+                    }
+                    for (vi in maxAllowedVerts until numVerts) {
+                      fusedV.put(vBuffer.get(vi * 3))
+                      fusedV.put(vBuffer.get(vi * 3 + 1))
+                      fusedV.put(vBuffer.get(vi * 3 + 2))
+                    }
+                    fusedV.position(0)
+                    finalVBuffer = fusedV
+                    finalIBuffer = iBuffer
+                    finalVertCount = numVerts
+                    finalTriCount = numTris
+                    finalArea = (existingVoxel.surfaceAreaSquareMeters * 0.6f) + (totalTriArea * 0.4f)
+                  } else {
+                    finalVBuffer = vBuffer
+                    finalIBuffer = iBuffer
+                    finalVertCount = numVerts
+                    finalTriCount = numTris
+                    finalArea = totalTriArea
+                  }
 
                   val chunk = MeshChunk(
                     id = chunkId,
                     sourceType = GeometrySourceType.ENVIRONMENTAL_3D_MESH,
                     category = cat,
-                    vertexCount = numVerts,
-                    triangleCount = numTris,
+                    vertexCount = finalVertCount,
+                    triangleCount = finalTriCount,
                     centerPosition = center,
-                    surfaceAreaSquareMeters = totalTriArea,
-                    vertexBuffer = vBuffer,
-                    indexBuffer = iBuffer
+                    surfaceAreaSquareMeters = finalArea,
+                    vertexBuffer = finalVBuffer,
+                    indexBuffer = finalIBuffer
                   )
 
                   // Accumulate into persistent world spatial voxels
@@ -486,12 +532,24 @@ class EnvironmentalMeshManager {
       totalTris += localMeshTris
       totalArea += localMeshArea
 
-      // Check persistent coverage flags
+      // Compute physical 3D bounding box span across persistent voxels
+      var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
+      var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+      var minZ = Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
+
       for (chunk in environmental3dChunks.values) {
+        val cp = chunk.centerPosition
+        minX = minOf(minX, cp[0]); maxX = maxOf(maxX, cp[0])
+        minY = minOf(minY, cp[1]); maxY = maxOf(maxY, cp[1])
+        minZ = minOf(minZ, cp[2]); maxZ = maxOf(maxZ, cp[2])
         if (chunk.category == MeshSurfaceCategory.FLOOR) hasFloor = true
         if (chunk.category == MeshSurfaceCategory.WALL) hasWall = true
         if (chunk.category == MeshSurfaceCategory.TABLE_SURFACE || chunk.category == MeshSurfaceCategory.DESK_OR_COUNTER) hasTable = true
       }
+
+      val spanX = if (environmental3dChunks.isNotEmpty()) (maxX - minX) else 0f
+      val spanZ = if (environmental3dChunks.isNotEmpty()) (maxZ - minZ) else 0f
+      val spanY = if (environmental3dChunks.isNotEmpty()) (maxY - minY) else 0f
 
       // Strictly separate the 5 distinct states:
       // State 1: Plane Detection (convex 2D polygons)
@@ -502,17 +560,20 @@ class EnvironmentalMeshManager {
       val isLocalMeshActive = environmental3dChunks.isNotEmpty()
       // State 4: Dense Local Reconstruction (substantial local geometric coverage)
       val isDenseLocalReconstruction = isLocalMeshActive && localMeshTris >= 300 && localMeshArea >= 3.0f
-      // State 5: Full Scene Reconstruction (requires dense spatial voxels across multiple persistent regions and surfaces)
+      // State 5: Full Scene Reconstruction (requires comprehensive measurable spatial coverage across wide room footprint)
       val isFull3dScene = isDenseLocalReconstruction &&
-                          environmental3dChunks.size >= 6 &&
-                          localMeshArea >= 6.0f &&
-                          localMeshTris >= 600 &&
+                          environmental3dChunks.size >= 12 &&
+                          localMeshArea >= 10.0f &&
+                          localMeshTris >= 1500 &&
+                          spanX >= 2.5f &&
+                          spanZ >= 2.5f &&
                           hasFloor &&
-                          (hasWall || hasTable)
+                          (hasWall && hasTable)
 
       val reconstructionStage = when {
         totalChunks == 0 -> "IDLE"
         !isLocalMeshActive -> "PLANE_DETECTION_ONLY"
+        !isDenseLocalReconstruction -> "LOCAL_SURFACE_MESH"
         !isFull3dScene -> "PARTIAL_3D_SCENE_RECONSTRUCTION"
         else -> "FULL_3D_SCENE_RECONSTRUCTION"
       }

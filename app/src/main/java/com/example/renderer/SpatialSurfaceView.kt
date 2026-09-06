@@ -359,6 +359,8 @@ class SpatialSurfaceView @JvmOverloads constructor(
           val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
           if (frame != null) {
             dualCameraGLSurfaceView?.updateFromArCoreFrame(frame)
+          } else {
+            dualCameraGLSurfaceView?.requestRender()
           }
           if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
             frame.camera.getProjectionMatrix(scratchProjMatrix, 0, 0.05f, 50.0f)
