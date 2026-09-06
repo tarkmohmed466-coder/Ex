@@ -63,8 +63,8 @@ fun CameraPassthroughView(
       .background(Color(0xFF070B14))
       .testTag("camera_passthrough_view")
   ) {
-    // 1. Authoritative Dual Camera Viewport - active and mounted in AR/MR modes with permission granted
-    if (isCameraRequired) {
+    // 1. Authoritative Dual Camera Viewport - kept mounted with permission to preserve EGL context and zero black screens
+    if (hasCameraPermission) {
       val dualCameraView = remember {
         DualCameraGLSurfaceView(context).also {
           it.displayMode = displayMode

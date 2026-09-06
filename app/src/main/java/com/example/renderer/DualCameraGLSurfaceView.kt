@@ -166,6 +166,8 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   private var viewWidth = 1
   private var viewHeight = 1
   private val texMatrix = FloatArray(16)
+  private val scratchLeftEyeTexMatrix = FloatArray(16)
+  private val scratchRightEyeTexMatrix = FloatArray(16)
   private var hasNewFrame = false
   var totalCameraFramesReceived: Long = 0L
     private set
@@ -501,14 +503,21 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
 
       if (displayMode == DisplayMode.MR) {
         val halfWidth = maxOf(viewWidth / 2, 1)
-        // 1. Left Eye (Left Camera Viewport)
+        // 1. Left Eye (Left Camera Viewport with optical stereo convergence shift)
+        System.arraycopy(texMatrix, 0, scratchLeftEyeTexMatrix, 0, 16)
+        android.opengl.Matrix.translateM(scratchLeftEyeTexMatrix, 0, -0.012f, 0f, 0f)
+        GLES20.glUniformMatrix4fv(uTexMatrixHandle, 1, false, scratchLeftEyeTexMatrix, 0)
         GLES20.glViewport(0, 0, halfWidth, viewHeight)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-        // 2. Right Eye (Right Camera Viewport)
+        // 2. Right Eye (Right Camera Viewport with optical stereo convergence shift)
+        System.arraycopy(texMatrix, 0, scratchRightEyeTexMatrix, 0, 16)
+        android.opengl.Matrix.translateM(scratchRightEyeTexMatrix, 0, 0.012f, 0f, 0f)
+        GLES20.glUniformMatrix4fv(uTexMatrixHandle, 1, false, scratchRightEyeTexMatrix, 0)
         GLES20.glViewport(halfWidth, 0, halfWidth, viewHeight)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
       } else {
+        GLES20.glUniformMatrix4fv(uTexMatrixHandle, 1, false, texMatrix, 0)
         // Single Camera Viewport (AR Mode)
         GLES20.glViewport(0, 0, viewWidth, viewHeight)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -568,6 +577,9 @@ class DualCameraGLSurfaceView @JvmOverloads constructor(
   override fun onResume() {
     try {
       super.onResume()
+      if (displayMode != DisplayMode.OBJECT) {
+        requestRender()
+      }
     } catch (e: Exception) {
       Log.w(TAG, "Error resuming GLSurfaceView: ${e.message}")
     }

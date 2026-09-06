@@ -290,12 +290,9 @@ class FilamentEngineHolder(private val context: Context) {
           rm.setPriority(inst, 4)
         }
       }
-      // Only mark GPU occlusion active if depth texture is uploaded AND material shader declares occlusion parameters
-      val hasShaderOcclusion = allMaterials.any {
-        it.material.hasParameter("physicalDepthTexture") || it.material.hasParameter("depthTexture")
-      }
-      isDepthTextureBoundToPipeline = filamentDepthTexture != null && hasShaderOcclusion
-      isGpuDepthOcclusionActive = isDepthTextureBoundToPipeline
+      // Mark GPU depth occlusion active when depth texture is uploaded to the pipeline
+      isDepthTextureBoundToPipeline = filamentDepthTexture != null
+      isGpuDepthOcclusionActive = filamentDepthTexture != null && isReady && textureId != 0
     } else {
       val allMaterials = mutableListOf<MaterialInstance>()
       currentAsset?.instance?.materialInstances?.let {
