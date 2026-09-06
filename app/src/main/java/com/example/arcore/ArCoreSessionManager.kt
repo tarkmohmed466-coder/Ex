@@ -147,6 +147,7 @@ class ArCoreSessionManager(private val context: Context) {
   var isConfigured: Boolean = false
     private set
 
+  @Volatile
   var latestFrame: Frame? = null
     private set
 
@@ -226,39 +227,14 @@ class ArCoreSessionManager(private val context: Context) {
    */
   fun setupSession(activity: Activity): Boolean {
     if (session != null) return true
-    if (availabilityChecked && !isSupported) return false
-
-    // If ARCore package is not installed on the device, avoid calling ARCore install service which will fail
-    // when Google Play Store is not installed or service cannot be bound
-    if (!isArCorePackageInstalled()) {
-      isSupported = false
-      availabilityChecked = true
-      Log.i(TAG, "ARCore package not installed on device. Operating in CameraX fallback mode.")
-      return false
-    }
-
-    // Check availability first to avoid throwing runtime exceptions in ARCoreApk on emulators or unsupported devices
-    if (!availabilityChecked) {
-      try {
-        val availability = ArCoreApk.getInstance().checkAvailability(context)
-        if (!availability.isTransient) {
-          isSupported = availability.isSupported
-          availabilityChecked = true
-          if (!isSupported) {
-            Log.i(TAG, "ARCore is unsupported on this hardware ($availability). Operating in graceful fallback mode.")
-            return false
-          }
-        }
-      } catch (t: Throwable) {
-        Log.w(TAG, "ARCore availability pre-check failed: ${t.message}")
-        isSupported = false
-        availabilityChecked = true
-        return false
-      }
-    }
 
     return try {
-      when (ArCoreApk.getInstance().requestInstall(activity, userRequestedInstall)) {
+      val installStatus = try {
+        ArCoreApk.getInstance().requestInstall(activity, userRequestedInstall)
+      } catch (e: Exception) {
+        ArCoreApk.InstallStatus.INSTALLED
+      }
+      when (installStatus) {
         ArCoreApk.InstallStatus.INSTALLED -> {
           val newSession = Session(activity)
           val config = Config(newSession)

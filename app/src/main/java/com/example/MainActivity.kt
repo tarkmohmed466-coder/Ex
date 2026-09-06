@@ -272,6 +272,7 @@ fun MixedRealityScreen(
         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
       },
       onDualCameraCreated = { dualView ->
+        dualView.arCoreSessionManager = spatialSurfaceView.arCoreSessionManager
         dualView.onCameraTextureReady = { texName ->
           spatialSurfaceView.arCoreSessionManager.setCameraTextureName(texName)
         }

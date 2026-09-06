@@ -1,11 +1,5 @@
 package com.example.ui.components
 
-import android.content.Context
-import android.util.Log
-import android.util.Size
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,7 +22,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -37,15 +30,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.model.DisplayMode
 import com.example.renderer.DualCameraGLSurfaceView
 
 /**
  * CameraPassthroughView provides real-time, hardware-accelerated camera feed.
+ * Authoritative pipeline: ARCore Camera -> One SurfaceTexture -> One GL External Texture -> AR/MR Renderer
  * - In MR Mode: Doubles the camera into Left and Right stereo viewports.
  * - In AR Mode: Renders single full-screen camera passthrough.
  * - In Object Mode: Clean dark studio canvas.
@@ -64,38 +57,23 @@ fun CameraPassthroughView(
 
   val isCameraRequired = (displayMode == DisplayMode.AR || displayMode == DisplayMode.MR) && hasCameraPermission
 
-  // When returning to Object Mode, guarantee any active camera provider is completely unbound
-  LaunchedEffect(displayMode) {
-    if (displayMode == DisplayMode.OBJECT) {
-      try {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        val executor = ContextCompat.getMainExecutor(context)
-        cameraProviderFuture.addListener({
-          try {
-            cameraProviderFuture.get().unbindAll()
-            Log.i("CameraPassthroughView", "Camera provider unbound successfully for Object Mode studio canvas.")
-          } catch (e: Exception) {
-            Log.w("CameraPassthroughView", "Error unbinding CameraX in Object Mode: ${e.message}")
-          }
-        }, executor)
-      } catch (e: Exception) {
-        Log.w("CameraPassthroughView", "Failed to access camera provider for unbind: ${e.message}")
-      }
-    }
-  }
-
   Box(
     modifier = modifier
       .fillMaxSize()
       .background(Color(0xFF070B14))
-      .testTag("camerax_preview_view")
+      .testTag("camera_passthrough_view")
   ) {
-    // 1. Dual Camera Viewport - active and mounted ONLY in AR/MR modes with permission granted
+    // 1. Authoritative Dual Camera Viewport - active and mounted in AR/MR modes with permission granted
     if (isCameraRequired) {
       val dualCameraView = remember {
         DualCameraGLSurfaceView(context).also {
+          it.displayMode = displayMode
           onDualCameraCreated?.invoke(it)
         }
+      }
+
+      LaunchedEffect(displayMode) {
+        dualCameraView.displayMode = displayMode
       }
 
       DisposableEffect(lifecycleOwner, dualCameraView) {
@@ -111,66 +89,6 @@ fun CameraPassthroughView(
         onDispose {
           lifecycleOwner.lifecycle.removeObserver(observer)
           dualCameraView.release()
-        }
-      }
-
-      // Bind CameraX to provide reliable live camera stream in AR and MR modes
-      DisposableEffect(lifecycleOwner, displayMode, dualCameraView) {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        val executor = ContextCompat.getMainExecutor(context)
-        var isDisposed = false
-
-        fun bindCamera() {
-          if (isDisposed) return
-          try {
-            val cameraProvider = cameraProviderFuture.get()
-            cameraProvider.unbindAll()
-
-            dualCameraView.displayMode = displayMode
-
-            val preview = Preview.Builder()
-              .setTargetResolution(Size(1280, 720))
-              .build()
-              .also {
-                it.setSurfaceProvider(executor) { request ->
-                  dualCameraView.provideSurface(request, executor)
-                }
-              }
-
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-            if (cameraProvider.hasCamera(cameraSelector)) {
-              cameraProvider.bindToLifecycle(
-                lifecycleOwner,
-                cameraSelector,
-                preview
-              )
-              Log.i("CameraPassthroughView", "CameraX bound successfully for $displayMode")
-            }
-          } catch (e: Exception) {
-            Log.e("CameraPassthroughView", "Camera binding error: ${e.message}", e)
-          }
-        }
-
-        dualCameraView.onCameraRecoveryNeeded = {
-          if (cameraProviderFuture.isDone) {
-            bindCamera()
-          }
-        }
-
-        cameraProviderFuture.addListener({
-          bindCamera()
-        }, executor)
-
-        onDispose {
-          isDisposed = true
-          try {
-            if (cameraProviderFuture.isDone) {
-              cameraProviderFuture.get().unbindAll()
-            }
-          } catch (e: Exception) {
-            Log.w("CameraPassthroughView", "Error unbinding camera on dispose: ${e.message}")
-          }
-          dualCameraView.detachCamera()
         }
       }
 

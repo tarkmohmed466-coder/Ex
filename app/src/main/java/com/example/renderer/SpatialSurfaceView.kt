@@ -311,18 +311,12 @@ class SpatialSurfaceView @JvmOverloads constructor(
         sensorsManager.stop()
         arCoreSessionManager.pauseSession()
         dualCameraGLSurfaceView?.displayMode = DisplayMode.OBJECT
-        dualCameraGLSurfaceView?.detachCamera()
       }
       DisplayMode.AR, DisplayMode.MR -> {
         sensorsManager.start()
+        dualCameraGLSurfaceView?.arCoreSessionManager = arCoreSessionManager
         dualCameraGLSurfaceView?.displayMode = displayMode
-        if (arCoreSessionManager.isArCorePackageInstalled()) {
-          try {
-            (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }
-          } catch (e: Exception) {
-            Log.w(TAG, "ARCore resume skipped: ${e.message}")
-          }
-        }
+        (context as? Activity)?.let { arCoreSessionManager.resumeSession(it) }
       }
     }
   }
@@ -357,18 +351,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
         }
 
         DisplayMode.AR -> {
-          val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
-          if (frame != null) {
-            consecutiveNullFrames = 0
-            dualCameraGLSurfaceView?.updateFromArCoreFrame(frame)
-          } else {
-            consecutiveNullFrames++
-            if (consecutiveNullFrames % 30 == 0) {
-              arCoreSessionManager.recoverCameraStream(context as? Activity)
-              dualCameraGLSurfaceView?.triggerCameraRecovery()
-            }
-            dualCameraGLSurfaceView?.requestRender()
-          }
+          val frame = arCoreSessionManager.latestFrame
           if (frame != null && frame.camera.trackingState == TrackingState.TRACKING) {
             frame.camera.getProjectionMatrix(scratchProjMatrix, 0, 0.05f, 50.0f)
             frame.camera.getViewMatrix(scratchViewMatrix, 0)
@@ -460,21 +443,7 @@ class SpatialSurfaceView @JvmOverloads constructor(
         }
 
         DisplayMode.MR -> {
-          val frame = try { arCoreSessionManager.updateFrame() } catch (e: Exception) { null }
-
-          // Camera passthrough must ALWAYS be rendered even if tracking is PAUSED or STOPPED
-          if (frame != null) {
-            consecutiveNullFrames = 0
-            dualCameraGLSurfaceView?.updateFromArCoreFrame(frame)
-          } else {
-            consecutiveNullFrames++
-            if (consecutiveNullFrames % 30 == 0) {
-              arCoreSessionManager.recoverCameraStream(context as? Activity)
-              dualCameraGLSurfaceView?.triggerCameraRecovery()
-            }
-            dualCameraGLSurfaceView?.requestRender()
-          }
-
+          val frame = arCoreSessionManager.latestFrame
           val hasValidTracking = frame != null && frame.camera.trackingState == TrackingState.TRACKING
           if (hasValidTracking && frame != null) {
             frame.camera.getViewMatrix(scratchHeadPoseMatrix, 0)
